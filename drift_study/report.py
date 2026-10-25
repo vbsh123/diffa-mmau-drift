@@ -143,6 +143,7 @@ def analyze(out, plots=False):
     fmt = lambda x:'N/A' if x is None else f'{x:.6f}'
     lines = ['# MMAU-Pro / official FPD drift', '',
         '128 maximum answer slots, 32-token blocks, factor=1.0; variable commits and natural EOS.', '',
+        'Long clips use complete chronological encoder windows; acoustic tokens are 64 per window, not 64 per complete clip.', '',
         'Hidden states at all transformer block outputs. Primary: mean per-token cosine distance.',
         'Average steps within each example, then layers, then examples with equal weight.', '',
         '| Cohort | N | N with adjacent drift | Semantic | Acoustic | Fixed text | Accuracy |',

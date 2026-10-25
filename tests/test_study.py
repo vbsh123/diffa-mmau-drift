@@ -41,7 +41,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(quotas(50), dict(speech=17, sound=17, music=16))
         row = dict(id='a', category='speech', length_type='short', audio_path=['data/a.wav'], question='Q', choices=['A','B'], answer='B')
         self.assertTrue(metadata_eligible(row))
-        for change in (dict(category='voice_chat'), dict(length_type='long'), dict(audio_path=['a','b']),
+        self.assertTrue(metadata_eligible(dict(row,length_type='long')))
+        self.assertTrue(metadata_eligible(dict(row,length_type='ultra-long')))
+        for change in (dict(category='voice_chat'), dict(audio_path=['a','b']),
                        dict(choices=['A','A']), dict(answer='C'), dict(id='../unsafe')):
             self.assertFalse(metadata_eligible(dict(row, **change)))
 
@@ -103,10 +105,11 @@ class DataTests(unittest.TestCase):
             with patch('huggingface_hub.HfApi') as api, \
                  patch('huggingface_hub.hf_hub_download', return_value=str(metadata)), \
                  patch('huggingface_hub.hf_hub_url', return_value='unused'), \
+                 patch('drift_study.data.context_spec',return_value=(lambda text:{'input_ids':[1]*20},4096)), \
                  patch('drift_study.data.HTTPRangeFile', FakeRemote):
                 api.return_value.dataset_info.return_value.sha = 'pinned'
-                one = prepare(root/'one'/'manifest.json', 6, revision='pinned')
-                two = prepare(root/'two'/'manifest.json', 6, revision='pinned')
+                one = prepare(root/'one'/'manifest.json',6,revision='pinned',min_seconds=0)
+                two = prepare(root/'two'/'manifest.json',6,revision='pinned',min_seconds=0)
             self.assertEqual([r['id'] for r in one['rows']], [r['id'] for r in two['rows']])
             self.assertEqual([r['domain'] for r in one['rows'][:3]], ['speech','sound','music'])
             self.assertEqual(one['quotas'], dict(speech=2,sound=2,music=2))

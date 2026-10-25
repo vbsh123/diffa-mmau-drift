@@ -3,14 +3,16 @@ import argparse
 from collections import Counter
 import io
 import json
+import math
 from pathlib import Path, PurePosixPath
 import random
 import re
 import zipfile
 
-from .protocol import DOMAINS, SEED, prompt_for
+from .protocol import ANSWER_TOKENS, DOMAINS, SEED, prompt_for
 from .remote_zip import HTTPRangeFile
 from .storage import digest, write_json
+from .audio_windows import INPUT_PROTOCOL, projected_tokens, wav_header
 
 DATASET = 'gamma-lab-umd/MMAU-Pro'
 DATASET_REVISION = 'b8516c217464d53be36d6dc334fda3cd578ed103'
@@ -23,7 +25,7 @@ def quotas(count):
 def metadata_eligible(row):
     choices = row.get('choices') or []
     return (bool(re.fullmatch(r'[A-Za-z0-9_-]{1,100}', str(row.get('id', ''))))
-            and row.get('category') in DOMAINS and row.get('length_type') == 'short'
+            and row.get('category') in DOMAINS
             and len(row.get('audio_path') or []) == 1
             and bool(row.get('question')) and 2 <= len(choices) <= 26
             and len(set(choices)) == len(choices) and choices.count(row.get('answer')) == 1)
@@ -44,20 +46,40 @@ def read_manifest(path):
     return document
 
 
-def prepare(out, samples=50, seed=SEED, revision=DATASET_REVISION, max_seconds=30., min_seconds=0.):
+def context_spec():
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoTokenizer
+    from .model import LLM_REPO,LLM_REVISION
+    path=hf_hub_download(LLM_REPO,'config.json',revision=LLM_REVISION)
+    config=json.loads(Path(path).read_text())
+    return AutoTokenizer.from_pretrained(LLM_REPO,revision=LLM_REVISION),int(config['max_sequence_length'])
+
+
+def prompt_token_count(tokenizer,instruction):
+    text=('<|startoftext|><|start_header_id|>system<|end_header_id|>\n\n'
+          'You are a helpful voice assistant.<|eot_id|>'
+          '<|start_header_id|>user<|end_header_id|>\n\nThis is the audio: <audio>. '
+          +instruction+'<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n')
+    return len(tokenizer(text)['input_ids'])
+
+
+def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,min_seconds=60.):
     from huggingface_hub import HfApi, hf_hub_download, hf_hub_url
     import pyarrow.parquet as pq
     import soundfile as sf
     out = Path(out).resolve()
-    settings = dict(samples=samples, seed=seed, max_seconds=max_seconds, min_seconds=min_seconds)
-    if samples < 3 or not 0 <= min_seconds < max_seconds <= 30:
-        raise ValueError('Need >=3 examples and duration bounds within 0–30 seconds')
+    settings = dict(samples=samples,seed=seed,max_seconds=max_seconds,min_seconds=min_seconds,
+                    input_protocol=INPUT_PROTOCOL)
+    if (samples<3 or not math.isfinite(min_seconds) or min_seconds<0
+            or (max_seconds is not None and (not math.isfinite(max_seconds) or max_seconds<=min_seconds))):
+        raise ValueError('Need >=3 examples and valid optional duration bounds; no default maximum')
     if out.exists():
         existing = read_manifest(out)
         if existing['settings'] != settings or revision not in ('main', existing['revision']):
             raise ValueError('Preparation settings changed; use a new manifest')
         return existing
     pinned = HfApi().dataset_info(DATASET, revision=revision).sha
+    tokenizer,context_limit=context_spec()
     metadata = hf_hub_download(DATASET, 'test.parquet', repo_type='dataset', revision=pinned)
     rows = pq.read_table(metadata).to_pylist()
     pools = {domain: sorted([r for r in rows if metadata_eligible(r) and r['category'] == domain], key=lambda r:r['id'])
@@ -84,30 +106,44 @@ def prepare(out, samples=50, seed=SEED, revision=DATASET_REVISION, max_seconds=3
                 if len(matches) != 1:
                     raise ValueError(f'Cannot uniquely locate {member} in archive')
                 info = archive.getinfo(matches[0])
-                # Only published short clips are candidates; actual headers remain authoritative.
-                if info.file_size > 24*1024*1024:
-                    rejected['large_payload'] += 1
-                    continue
-                payload = archive.read(info)
-                description = sf.info(io.BytesIO(payload))
+                # Inspect full duration from RIFF sizes before fetching large candidates.
+                payload=None
+                try:
+                    with archive.open(info) as stream:
+                        description=wav_header(stream)
+                except ValueError:
+                    payload=archive.read(info)
+                    description=sf.info(io.BytesIO(payload))
                 duration = description.frames/description.samplerate
-                if not min_seconds < duration <= max_seconds:
+                if duration<=min_seconds or (max_seconds is not None and duration>max_seconds):
                     rejected[domain+'_duration'] += 1
                     continue
                 if not description.frames or description.channels != 1:
                     rejected[domain+'_empty_or_stereo'] += 1
                     continue
+                instruction=prompt_for(candidate['question'],candidate['choices'])
+                text_tokens=prompt_token_count(tokenizer,instruction)
+                estimate=projected_tokens(description.frames,description.samplerate)
+                if estimate['total']+text_tokens+ANSWER_TOKENS>context_limit:
+                    rejected[domain+'_context_budget']+=1
+                    continue
+                if payload is None:
+                    payload=archive.read(info)
+                actual=sf.info(io.BytesIO(payload))
+                if (actual.frames,actual.samplerate,actual.channels)!=(description.frames,description.samplerate,description.channels):
+                    raise ValueError('Full audio header differs from streamed header; refusing truncated or inconsistent audio')
                 target = chr(65+candidate['choices'].index(candidate['answer']))
                 destination = audio_dir/(candidate['id']+'.wav')
                 destination.write_bytes(payload)
                 accepted[domain].append(dict(id=candidate['id'], domain=domain,
                     question=candidate['question'], choices=candidate['choices'], target=target,
-                    prompt=prompt_for(candidate['question'], candidate['choices']),
+                    prompt=instruction,estimated_audio_tokens=estimate,text_tokens=text_tokens,
                     audio=str(destination.relative_to(out.parent)), audio_sha256=digest(destination),
                     audio_seconds=duration, sample_rate=description.samplerate, channels=description.channels,
                     source_audio=member, length_type=candidate.get('length_type'),
                     perceptual_skills=candidate.get('perceptual_skills'), reasoning_skills=candidate.get('reasoning_skills')))
-                print(f'Prepared {domain} {len(accepted[domain])}/{needed}: {duration:.2f}s', flush=True)
+                print(f'Prepared {domain} {len(accepted[domain])}/{needed}: {duration:.2f}s; '
+                      f'{estimate["windows"]} windows, {estimate["total"]} audio tokens',flush=True)
                 if len(accepted[domain]) == needed:
                     break
             if len(accepted[domain]) != needed:
@@ -117,6 +153,7 @@ def prepare(out, samples=50, seed=SEED, revision=DATASET_REVISION, max_seconds=3
     document = dict(dataset=DATASET, revision=pinned, metadata_sha256=digest(metadata), settings=settings,
                     quotas=quotas(samples), exclusions=dict(rejected), archive_bytes_read=remote.bytes_received,
                     metadata_rows=len(rows), metadata_eligible_rows=sum(map(len, pools.values())), rows=selected)
+    document['context_limit']=context_limit
     write_json(out, document)
     return document
 
@@ -127,8 +164,8 @@ def load_audio(path):
     import torch
     import torchaudio
     audio, rate = sf.read(path, dtype='float32', always_2d=True)
-    if audio.shape[1] != 1 or not audio.size or not np.isfinite(audio).all() or len(audio)/rate > 30:
-        raise ValueError('Need complete finite mono audio <=30s')
+    if audio.shape[1] != 1 or not audio.size or not np.isfinite(audio).all():
+        raise ValueError('Need complete finite mono audio')
     wave = torch.from_numpy(audio[:, 0].copy())
     if rate != 16000:
         wave = torchaudio.functional.resample(wave, rate, 16000)
@@ -137,12 +174,14 @@ def load_audio(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--out', type=Path, default=Path('data/mmau50.json'))
+    p.add_argument('--out', type=Path, default=Path('data/mmau50_long.json'))
     p.add_argument('--samples', type=int, default=50)
     p.add_argument('--seed', type=int, default=SEED)
     p.add_argument('--revision', default=DATASET_REVISION)
+    p.add_argument('--min-seconds',type=float,default=60.)
+    p.add_argument('--max-seconds',type=float,default=None)
     args = p.parse_args()
-    prepare(args.out, args.samples, args.seed, args.revision)
+    prepare(args.out,args.samples,args.seed,args.revision,args.max_seconds,args.min_seconds)
 
 
 if __name__ == '__main__':

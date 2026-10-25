@@ -39,6 +39,7 @@ class Prepared:
     insertion: int
     acoustic_count: int
     mask_id: int
+    audio_chunks: object = None
 
     @property
     def prefix_length(self):
@@ -48,6 +49,17 @@ class Prepared:
         audio_end = self.insertion + int(self.speech.shape[1])
         if not 0 < self.acoustic_count < int(self.speech.shape[1]):
             raise ValueError('Expected nonempty acoustic and semantic groups')
-        return dict(acoustic=list(range(self.insertion, self.insertion+self.acoustic_count)),
-                    semantic=list(range(self.insertion+self.acoustic_count, audio_end)),
-                    text=list(range(self.insertion))+list(range(audio_end, self.prefix_length)))
+        if self.audio_chunks is None:
+            acoustic=list(range(self.insertion,self.insertion+self.acoustic_count))
+            semantic=list(range(self.insertion+self.acoustic_count,audio_end))
+        else:
+            acoustic,semantic,position=[],[],self.insertion
+            for chunk in self.audio_chunks:
+                a,s=chunk['acoustic_tokens'],chunk['semantic_tokens']
+                acoustic.extend(range(position,position+a))
+                semantic.extend(range(position+a,position+a+s))
+                position+=a+s
+            if position!=audio_end or len(acoustic)!=self.acoustic_count:
+                raise ValueError('Audio window layout does not match projected tokens')
+        return dict(acoustic=acoustic,semantic=semantic,
+                    text=list(range(self.insertion))+list(range(audio_end,self.prefix_length)))

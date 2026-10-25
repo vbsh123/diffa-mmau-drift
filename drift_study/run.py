@@ -9,6 +9,7 @@ import time
 
 import torch
 
+from .audio_windows import INPUT_PROTOCOL
 from .checkout import COMMIT, DEFAULT_ROOT, verify_checkout
 from .data import load_audio, read_manifest
 from .fpd import generate, output_record, save_trace
@@ -23,8 +24,8 @@ WHISPER_REVISION = '06f233fe06e710322aca913c1bc4249a0d71fce1'
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--manifest', type=Path, default=Path('data/mmau50.json'))
-    p.add_argument('--out', type=Path, default=Path('runs/mmau50_fpd128'))
+    p.add_argument('--manifest', type=Path, default=Path('data/mmau50_long.json'))
+    p.add_argument('--out', type=Path, default=Path('runs/mmau50_long_fpd128'))
     p.add_argument('--diffa-root', type=Path, default=DEFAULT_ROOT)
     p.add_argument('--samples', type=int, default=50)
     p.add_argument('--seed', type=int, default=SEED)
@@ -39,6 +40,8 @@ def main():
     if args.samples < 1 or not 0 <= args.verify_samples <= args.samples:
         raise ValueError('Invalid sample or verification count')
     manifest = read_manifest(args.manifest)
+    if manifest['settings'].get('input_protocol') != INPUT_PROTOCOL:
+        raise ValueError('Prepare a fresh complete-clip long-audio manifest; old short cohorts are not reused')
     if args.samples > len(manifest['rows']):
         raise ValueError('Requested sample count exceeds frozen cohort')
     rows = manifest['rows'][:args.samples]
@@ -50,9 +53,10 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    config = dict(protocol='mmau-pro-official-fpd-drift-v1', source_sha256=source_digest(),
+    config = dict(protocol='mmau-pro-official-fpd-long-drift-v2', source_sha256=source_digest(),
         upstream_commit=COMMIT, manifest_sha256=digest(args.manifest),
         dataset=manifest['dataset'], dataset_revision=manifest['revision'],
+        input_protocol=INPUT_PROTOCOL, audio_selection=manifest['settings'],
         sample_ids=[r['id'] for r in rows], seed=args.seed,
         decoder=dict(name='official DIFFA-2 fast_dllm FPD', factor=FACTOR,
             max_answer_tokens=ANSWER_TOKENS, block_tokens=BLOCK_TOKENS, temperature=0.,
@@ -101,6 +105,10 @@ def main():
         directory.mkdir(parents=True)
         audio = load_audio(args.manifest.resolve().parent/row['audio'])
         prepared = prepare(model, tokenizer, extractor, audio, row['prompt'], ANSWER_TOKENS)
+        expected = row['estimated_audio_tokens']
+        actual = prepared.groups()
+        if (len(actual['acoustic']),len(actual['semantic']),prepared.prompt.shape[1]) != (expected['acoustic'],expected['semantic'],row['text_tokens']):
+            raise ValueError('Actual windowed audio/text token counts differ from cohort preflight')
         reference = None
         if index < args.verify_samples:
             print(f'Untouched FPD verification {index+1}/{args.verify_samples}', flush=True)
@@ -129,7 +137,7 @@ def main():
         if (directory/'pairwise.npz').exists():
             artifacts.append('pairwise.npz')
         write_json(result_path, dict(id=row['id'], domain=row['domain'], audio_sha256=row['audio_sha256'],
-            audio_seconds=row['audio_seconds'], source_index=index, output=record,
+            audio_seconds=row['audio_seconds'], audio_chunks=prepared.audio_chunks, source_index=index, output=record,
             score=grade(record['text'], row['target']), forward_count=nfe,
             untouched_fpd_verified=verified, group_tokens={g:len(p) for g,p in prepared.groups().items()},
             instrumented_seconds=instrumented_seconds, timing_is_instrumented=True,

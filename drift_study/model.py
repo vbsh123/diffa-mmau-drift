@@ -8,6 +8,7 @@ import torch
 
 from .checkout import verify_checkout
 from .protocol import Prepared
+from .audio_windows import ACOUSTIC_PER_WINDOW, WINDOW_SAMPLES, window_ranges
 
 DIFFA_REPO = "zhoujiaming777/DIFFA-2"
 DIFFA_REVISION = "8aea6122bafb25578cb49d142c6ac1f8e83e3dea"
@@ -102,15 +103,23 @@ def prepare(model, tokenizer, extractor, audio, instruction, length,
             system_prompt="You are a helpful voice assistant."):
     from src.dataloader import build_chat_prompt
 
-    inputs = extractor(audio, sampling_rate=16000, return_tensors="pt",
-                       return_attention_mask=True, truncation=False)
-    inputs = inputs.to(model.llm_model.device)
-    speech, valid = model.get_speech_features(inputs.input_features, inputs.attention_mask, stage=2)
-    acoustic_count = model.acoustic_connector.layer_prompts[0].shape[1]
-    if speech.shape[0] != 1 or not valid.all() or valid.shape[1] != speech.shape[1]:
-        raise ValueError(f"Expected one clip with only valid, unpadded projected audio tokens; "
-                         f"speech={tuple(speech.shape)}, valid={tuple(valid.shape)}, "
-                         f"valid_count={int(valid.sum())}, acoustic={acoustic_count}")
+    acoustic_per_chunk = model.acoustic_connector.layer_prompts[0].shape[1]
+    if acoustic_per_chunk != ACOUSTIC_PER_WINDOW or extractor.n_samples != WINDOW_SAMPLES:
+        raise ValueError('Unexpected pinned encoder window or acoustic connector size')
+    embeddings,chunks=[],[]
+    for start,end in window_ranges(len(audio)):
+        inputs = extractor(audio[start:end], sampling_rate=16000, return_tensors="pt",
+                           return_attention_mask=True, truncation=False)
+        inputs = inputs.to(model.llm_model.device)
+        speech,valid = model.get_speech_features(inputs.input_features,inputs.attention_mask,stage=2)
+        if speech.shape[0]!=1 or not valid.all() or valid.shape[1]!=speech.shape[1]:
+            raise ValueError('Projected audio window contains padding or invalid positions')
+        embeddings.append(speech.to(torch.bfloat16))
+        chunks.append(dict(start_sample=start,end_sample=end,
+            acoustic_tokens=acoustic_per_chunk,semantic_tokens=int(speech.shape[1])-acoustic_per_chunk))
+    # [A1,S1,A2,S2,...] retains chronological windows and every projected token.
+    speech=torch.cat(embeddings,dim=1)
+    acoustic_count=len(chunks)*acoustic_per_chunk
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user", "content": "This is the audio: "}]
     prefix = build_chat_prompt(messages, add_generation_prompt=False)[:-10]
@@ -127,4 +136,4 @@ def prepare(model, tokenizer, extractor, audio, instruction, length,
     mask_id = model.llm_model.config.mask_token_id
     if (prompt == mask_id).any() or not 0 <= insertion <= prompt.shape[1]:
         raise ValueError("Invalid prompt MASK or insertion position")
-    return Prepared(prompt, speech.to(torch.bfloat16), insertion, acoustic_count, mask_id)
+    return Prepared(prompt,speech,insertion,acoustic_count,mask_id,tuple(chunks))

@@ -165,6 +165,9 @@ class CacheEngineTests(unittest.TestCase):
 
     @torch.no_grad()
     def test_bfloat16_deep_layer_cache_matches_dense_reference(self):
+        from drift_study.protocol import Prepared
+        self.prepared=Prepared(torch.tensor([[1,2,3,4]]),torch.randn(1,11,16).bfloat16(),2,4,31,
+            (dict(acoustic_tokens=2,semantic_tokens=3),dict(acoustic_tokens=2,semantic_tokens=4)))
         tested=deepcopy(self.llm)
         reference=deepcopy(self.llm)
         intervals=(32,16,32)

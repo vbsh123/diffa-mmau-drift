@@ -1,6 +1,6 @@
 # Official-FPD cache benchmark
 
-Same frozen **50 MMAU-Pro questions** and reasoning prompt as the drift study,
+Same frozen **50 long-audio MMAU-Pro questions** and reasoning prompt as the drift study,
 128 maximum answer tokens, official confidence-adaptive FPD and natural EOS.
 This is a separate package/job, with no changes to `drift_study/` or its source
 fingerprint. It does not modify the running drift experiment or its outputs.
@@ -24,6 +24,10 @@ On reuse steps, the selected layers physically skip prefix Q/K/V projections,
 attention queries/output, and MLP rows. They reuse post-RoPE K/V and post-block
 hidden states for those prefix positions. This is approximate bidirectional
 caching; no tokens are pruned and there is no sparse attention mask.
+
+The old short-input experiment is preserved on branch `short-audio-v1`. Acoustic
+tokens are64 per encoder window in the new complete-clip path, and group positions
+can be noncontiguous. The cache engine uses those actual positions.
 
 ## Start from the measured mean
 
@@ -73,26 +77,27 @@ own K/V/output cache. Accounting records computed rows separately for every laye
 
 **Finish the drift job first. Do not run both jobs on the same GPU.** Clone a
 separate checkout for caching; do not pull changes into an active drift checkout.
+Use the new long-audio baseline from the corrected input path, not the old short cohort.
 The original run must retain its `config.json`, `samples/*/result.json`, forward
 traces and frozen manifest, not just the analysis report.
 
 ```bash
 cd /workspace
-git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-cache
-cd diffa-mmau-cache
+git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-long-cache
+cd diffa-mmau-long-cache
 nohup env \
   SKIP_INSTALL=1 \
   AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
   DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
-  BASELINE_RUN=/workspace/diffa-mmau-drift/runs/mmau50_fpd128 \
-  bash scripts/cache.sh > cache50_mean_all.log 2>&1 &
-tail -f cache50_mean_all.log
+  BASELINE_RUN=/workspace/diffa-mmau-long/runs/mmau50_long_fpd128 \
+  bash scripts/cache.sh > cache50_long_mean_all.log 2>&1 &
+tail -f cache50_long_mean_all.log
 ```
 
 This reuses the installed environment and official source. HF model downloads
 are reused through the normal shared cache. The new checkout prepares the same
 small deterministic audio cohort independently. If the paths differ, adjust them.
-`BASELINE_MANIFEST` overrides the assumed original `<drift-repo>/data/mmau50.json`.
+`BASELINE_MANIFEST` overrides the assumed original `<drift-repo>/data/mmau50_long.json`.
 On a new machine omit `SKIP_INSTALL=1` and `AUDIO_VENV` to install dependencies.
 
 All50 baseline results are required before any model loading. To inspect the
@@ -101,14 +106,14 @@ resolved mean/start point without loading a model:
 ```bash
 source /workspace/diffa-mmau-drift/.venv/bin/activate
 python -m cache_study.run \
-  --baseline-run /workspace/diffa-mmau-drift/runs/mmau50_fpd128 \
-  --manifest data/mmau50.json --preflight-only
+  --baseline-run /workspace/diffa-mmau-long/runs/mmau50_long_fpd128 \
+  --manifest data/mmau50_long.json --preflight-only
 ```
 
 For a three-question smoke run add `SAMPLES=3 RUN_NAME=runs/cache_smoke3` to the
 `env` command. Calibration still requires all50 completed original questions.
 For a later deep-layer experiment add `CACHE_LAYERS=16-31` after choosing the
-range from the drift results. The default output becomes `runs/cache50_mean_16-31`.
+range from the drift results. The default output becomes `runs/cache50_long_mean_16-31`.
 
 ## Timing, verification and outputs
 
@@ -134,7 +139,7 @@ range from the drift results. The default output becomes `runs/cache50_mean_16-3
   conditions without rerunning their timed measurements. New source/settings need
   a fresh output root.
 
-Read `runs/cache50_mean_all/analysis/report.md`, `summary.json`, and `pairs.csv`.
+Read `runs/cache50_long_mean_all/analysis/report.md`, `summary.json`, and `pairs.csv`.
 Reports update after each condition. Paired losses/recoveries use common examples;
 paired latency speedup uses successful baseline/cache pairs. Failures remain in
 accuracy but are excluded from speed/TPS, with sample counts exposed. Autonomous

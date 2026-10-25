@@ -1,185 +1,159 @@
-# DIFFA-2: MMAU-Pro drift with official FPD
+# DIFFA-2 long-audio drift with official FPD
 
-The separate [cache benchmark](CACHING.md) provides six acoustic/text/semantic
-refresh schedules, delayed start from the completed drift cohort's mean forward
-count, and configurable layer ranges for later deep-layer experiments.
+The default study now selects **50 complete MMAU-Pro clips longer than 60 seconds**.
+There is **no fixed maximum clip duration**, no `short` metadata filter, and no
+24MiB payload cutoff. Entire clips must fit the pinned backbone's actual context
+budget: 4096 positions including audio, text and 128 answer slots. A clip that does
+not fit is excluded as a whole with a recorded `context_budget` reason; it is
+never cropped, summarized, or silently truncated.
 
-Fresh 50-example observation study of **semantic audio, acoustic audio, and fixed
-input text**. Uses the pinned official DIFFA-2 factor-based parallel decoder
-directly. **128 maximum answer tokens**, 32-token blocks, factor=1.0, temperature=0.
-The prompt requests brief step-by-step audio-grounded reasoning and ends with
-`Final answer: <letter>`.
+The previous <=30-second experiment is preserved on branch `short-audio-v1`.
+Its manifests and outputs are separate. The new default uses
+`data/mmau50_long.json` and `runs/mmau50_long_fpd128` and refuses to reuse an old
+short-cohort manifest.
 
-FPD determines the commit count from confidence at each forward. There is no
-fixed commit quota, fixed confidence threshold, forced answer length, temporal
-KV/hidden reuse, pruning, sparse attention, or injected reasoning tags. The 128
-slots are a maximum canvas, not a requirement to generate 128 tokens. Official
-EOS handling stops once there are no unresolved masks before EOS. Capacity
-exhaustion and incomplete final-answer formats remain visible in results.
+## Complete audio encoding
 
-The official generator is imported from an unchanged checkout, not reimplemented.
-A read-only wrapper logs its original transfer decisions and returns its exact
-tensors. Block hooks observe all 32 block outputs. A watchdog aborts pathological
-runs after 1024 forwards instead of forcing tokens or silently modifying decoding.
+Whisper still has its native 30-second encoder window. This is an **encoder window
+size**, not a limit on the duration of a dataset clip. The input path partitions
+all resampled samples into balanced, adjacent windows of at most 480000 samples.
+Every sample belongs to exactly one window. Each window is encoded using the
+original Whisper, acoustic connector and semantic connector. Projected tokens
+are concatenated chronologically as `[A1,S1,A2,S2,...]`.
 
-## Vast: one setup-and-run command
+All acoustic and semantic tokens are retained. Acoustic tokens are **64 per
+window**, not 64 per complete long clip. Semantic tokens grow with total duration.
+For example, 90 seconds produces 1125 semantic plus 192 acoustic tokens: 1317 audio
+tokens, compared with roughly 304 in the old short-audio cohort. Actual chunk
+sample boundaries and token counts are saved for every result. The three token
+groups use their true, potentially noncontiguous positions.
 
-The repository is public. Clone and run directly; no GitHub login is required.
+This is a documented long-input extension around the original encoder/connectors.
+The **official FPD decoder remains unchanged**: 128 maximum answer tokens,
+32-token blocks, factor 1.0, temperature 0, confidence-adaptive commits, natural EOS.
+The prompt explicitly requests brief step-by-step audio-grounded reasoning and
+`Final answer: <letter>`. There is no forced answer length or fixed commit quota.
+Long-input answer quality must be evaluated on the GPU; CPU validation of the
+input path is not a claim that the checkpoint was trained for this extension.
 
-Use a **single A40 48GB** (or another BF16 CUDA GPU with enough VRAM), Python
-3.10–3.12, a CUDA 12.4-compatible driver, and approximately **100GB free disk**
-for the Python environment, model cache, and temporary activations. Full model
-inference has not been run locally; GPU runtime is not yet measured.
+## Vast: new checkout and run
+
+Use an A40 48GB or another suitable BF16 CUDA GPU, Python 3.10–3.12, a CUDA 12.4
+compatible driver and approximately 150GB free disk. Long-prefix drift and matrix
+collection cost more than the old short run; runtime is not yet measured.
+
+Use a fresh checkout, leaving any earlier process/output untouched. If the old
+installation is at the previously documented paths, reuse it:
 
 ```bash
 cd /workspace
-git clone https://github.com/vbsh123/diffa-mmau-drift.git
-cd diffa-mmau-drift
-nohup bash scripts/run.sh > mmau50_fpd128.log 2>&1 &
-tail -f mmau50_fpd128.log
+git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-long
+cd diffa-mmau-long
+nohup env SKIP_INSTALL=1 \
+  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
+  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
+  bash scripts/run.sh > mmau50_long_fpd128.log 2>&1 &
+tail -f mmau50_long_fpd128.log
 ```
 
-This installs pinned dependencies, fetches and verifies official DIFFA source,
-prepares the frozen cohort, loads models once, verifies the first two instrumented
-decodes against untouched official FPD (exact complete IDs and forward count),
-measures all 50, and writes reports and PNG figures. Closing `tail` with Ctrl-C
-does not stop the job. Run only one experiment per GPU.
+On a machine without that installation, run `nohup bash scripts/run.sh` instead;
+setup creates `.venv`, installs pinned dependencies and fetches official source.
+The repository is public; GitHub authentication is unnecessary. Do not run this
+alongside another inference job on the same GPU.
 
-Setup without inference:
+Setup/preparation without model inference:
 
 ```bash
 bash scripts/setup.sh
-```
-
-Optional three-example GPU check (one per domain, drawn from the same 50):
-
-```bash
-nohup bash scripts/smoke.sh > smoke3_fpd128.log 2>&1 &
-tail -f smoke3_fpd128.log
-```
-
-Then run the full study, reusing the installed environment and downloaded inputs:
-
-```bash
-nohup env SKIP_INSTALL=1 bash scripts/run.sh > mmau50_fpd128.log 2>&1 &
-```
-
-An unchanged full run resumes completed examples after validating artifact hashes.
-Source/environment/config changes require a new `RUN_NAME`. Incomplete examples
-restart; historical experiments are never imported. Do not update the checkout
-while a process is running. `AUDIO_VENV` and `DIFFA_ROOT` can reuse compatible
-installations. The smoke run and full run have separate output roots.
-
-## Cohort
-
-- Pinned `gamma-lab-umd/MMAU-Pro` revision
-  `b8516c217464d53be36d6dc334fda3cd578ed103`.
-- Seed 20261025; 17 speech, 17 sound, 16 music; interleaved domains.
-- Published `short` category, single audio, MCQs with 2–26 distinct choices,
-  exactly one matching reference. Full audio must be **mono and <=30 seconds**.
-- No correctness-based selection, cropping, stereo downmixing, multi-audio
-  concatenation, or silent replacement of an insufficient domain pool.
-- Candidates are sorted by ID, shuffled deterministically per domain, and
-  admitted by full-file audio headers. Exclusions, actual duration, option order,
-  hashes, prompts, source revision, and bytes fetched are saved in the manifest.
-- Metadata is ~1MB. HTTP Range reads fetch central-directory metadata and individual
-  WAV members from the 47GB archive; the archive is **not downloaded in full**.
-  Servers that ignore range requests cause failure before reading their payload.
-  Non-audio metadata, files over 24MiB, and non-mono/duration failures are excluded.
-
-This is a **short, mono, single-audio MCQ subset**, not a representative evaluation
-of all MMAU-Pro or a long-audio scaling experiment. DIFFA's existing single-clip
-encoder is retained. All admitted examples, including wrong answers, enter drift
-statistics. Generated reasoning is requested but is not separately graded.
-
-## Drift measurement
-
-For group g at block l and forwards t,s, the primary metric is the average over
-fixed token positions of `1 - cosine(h[t,l,i], h[s,l,i])`, calculated in FP32.
-We additionally save cosine distance of the flattened group, token median/p90/max,
-and zero-norm counts. Two zero vectors have similarity 1; one zero vector has 0.
-
-- Main hidden-state measurements: **all 32 transformer block outputs**, every
-  actual forward, against the previous forward and initial forward. Block 0 is
-  the first transformer output, not the embedding layer. No layer is omitted.
-- Semantic and acoustic memberships come from actual inserted speech positions.
-  All fixed text, including system/user instructions, choices and chat delimiters,
-  enters the text group. Generated/MASK answer positions and padding are excluded.
-- Acoustic tokens are the connector's actual count (normally 64). Semantic and
-  text counts are measured independently for every example.
-- Full cross-step cosine matrices: first admitted example of each domain,
-  predetermined before inference, at blocks **0,7,15,23,31**. These selected
-  matrices supplement the all-layer measurements; they are not all-layer matrices.
-  BF16 states are stored losslessly in temporary disk scratch. Only small token
-  chunks are expanded to FP32 during pairwise analysis, then scratch is deleted.
-- No K/V drift or attention probes in this first experiment: hidden states match
-  the quantity used in VidLaDA's diagnostic figures.
-
-Examples have equal weight: average valid consecutive-forward comparisons within
-each example/layer, then layers and examples. Single-forward decodes have no
-adjacent comparison and are counted explicitly. Domain summaries, per-layer
-means, and paired example-bootstrap intervals for audio-minus-text are saved.
-Raw forward-index heatmaps include contributing-example counts. Separately,
-normalized-progress heatmaps interpolate within each example's observed range;
-they do not pad ended trajectories with zeros. Correct-only filtering is not used.
-
-VidLaDA Figures 4–5 show hidden-state cosine matrices and `1-cosine` drift across
-layers/steps. The released repository does not include a diagnostic script
-specifying its activation hook, token reduction, or reference step. Our precise
-choices are documented above; this is a transparent adaptation of the published
-analysis, not a claim of identical undocumented implementation. VidLaDA's 128-token
-controlled ablations also used fixed schedules; **we retain DIFFA FPD instead**.
-
-## Outputs
-
-`runs/mmau50_fpd128/` contains:
-
-- `config.json`: exact decoder, model/source/input revisions, GPU/environment.
-- `model_load.json`: checkpoint/LoRA loading checks.
-- `samples/00000/result.json`: output IDs/text, final-letter grade, natural EOS,
-  capacity flag, group sizes, verification outcome, artifact hashes.
-- `samples/00000/trace.jsonl`: actual commits, positions, IDs, eligible masks and
-  block for every official FPD forward.
-- `samples/00000/drift.jsonl` and `measurement.json`: all-layer/group drift and
-  layer/reference conventions.
-- `samples/00000/pairwise.npz`: exemplar step-pair matrices where selected.
-- `analysis/report.md`, `summary.json`: refreshed after every completed example.
-- `analysis/*drift.png`, `*contributors.png`, `pairwise_*.png`, and heatmap NPZ
-  arrays with contributor counts: generated after the full collection.
-
-All instrumented wall times include observation overhead and **must not be used
-as clean inference throughput**. There are no speedup claims in this pilot.
-
-Rebuild figures later without loading models:
-
-```bash
 source .venv/bin/activate
-python -m drift_study.report runs/mmau50_fpd128 --plots
+python -m drift_study.data --out data/mmau50_long.json --samples 50
 ```
 
-Package completed outputs for download:
+`MIN_SECONDS` defaults to 60; `MAX_SECONDS` is unset by default. These explicit
+user overrides also work through `scripts/run.sh`. The model token budget is
+always checked. The sampler reads original WAV headers selectively from the
+47GB archive before fetching eligible complete files. The small tokenizer/config
+are loaded for token-budget preflight; model weights are not loaded at this stage.
+
+Optional GPU smoke run of the first three of the same 50 examples:
 
 ```bash
-tar -czf mmau50_fpd128.tar.gz -C runs mmau50_fpd128
+nohup env SKIP_INSTALL=1 \
+  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
+  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
+  bash scripts/smoke.sh > smoke3_long_fpd128.log 2>&1 &
 ```
 
-## Verification
+The first two examples compare untouched official FPD with observed FPD using
+identical windowed embeddings: exact complete output IDs and forward count must
+match. Every actual window's projected token count is checked against preflight.
+Completed examples resume only under unchanged source/config/environment.
+Interrupted examples restart. No old output is overwritten.
+
+## Cohort and observations
+
+Seed 20261025; 17 speech, 17 sound, 16 music. Single-audio MCQs, 2–26 distinct options,
+exactly one matching reference, complete finite mono WAVs. No correctness-based
+selection. All published duration labels are eligible; actual full-file headers
+and model token fit determine admission. The pinned dataset revision is
+`b8516c217464d53be36d6dc334fda3cd578ed103`.
+
+Hidden-state drift is measured at **all 32 transformer block outputs**, every
+actual forward, for semantic audio, acoustic audio and fixed input text.
+Generated answer slots are excluded from these groups. The primary statistic
+is mean per-position FP32 cosine distance against the previous forward; initial
+reference and flattened-group cosine are also saved. Examples have equal weight.
+Single-forward outputs have no adjacent comparison and are counted separately.
+All answers, including incorrect/capacity-limited answers, remain in the analysis.
+
+Step-pair matrices use the first example of each domain, selected beforehand,
+at blocks 0, 7, 15, 23, 31. BF16 states are saved losslessly to temporary scratch;
+small token chunks are expanded for pairwise computation and scratch is deleted.
+No full attention matrices are collected. Timings include observation overhead
+and must not be reported as clean inference throughput.
+
+VidLaDA Figures 4–5 motivate the cosine matrices and layer/step heatmaps. Its
+released code does not specify every diagnostic reduction/hook detail, so our
+block-output, token-mean reduction and references are documented explicitly.
+
+## Results and cache benchmark
+
+`runs/mmau50_long_fpd128/analysis/report.md` and `summary.json` update after each
+example. Final figures include raw/normalized-progress drift heatmaps, contributor
+counts and exemplar similarity matrices. Each sample retains output IDs/text,
+strict grade, actual NFE, EOS/capacity flags, full chunk coverage, group counts,
+trace, all-layer drift and artifact hashes. Config pins source, inputs and models.
+
+Rebuild figures without loading a model:
+
+```bash
+python -m drift_study.report runs/mmau50_long_fpd128 --plots
+```
+
+Package outputs:
+
+```bash
+tar -czf mmau50_long_fpd128.tar.gz -C runs mmau50_long_fpd128
+```
+
+The separate [cache benchmark](CACHING.md) supports the six requested triplets,
+mean/half-mean/immediate start, and all/shallow/deep layer selections. It needs a
+**new complete long-audio baseline**, never the old 56.3-forward short baseline.
+
+## Verification and references
 
 ```bash
 bash scripts/test.sh
 ```
 
-CPU tests exercise the real pinned LLaDA implementation and official FPD function
-with a small random model, exact observation parity, group positions, metric and
-pairwise reductions, selective archive reads, deterministic sampling, and report
-coverage. The first two full-model GPU examples perform the separate exact-ID/NFE
-check at runtime. Tests do not establish full-checkpoint GPU performance.
+Tests cover complete long-wave loading, header-only inspection without size
+cutoffs, lossless sample coverage across windows, exact token estimates, native
+DIFFA encoder/connector processing with small random weights, interleaved group
+membership, native FPD, cache reference equivalence and reports. Full-checkpoint
+GPU validation runs separately on Vast.
 
-## References
-
-- [DIFFA-2 paper](https://arxiv.org/html/2601.23161), especially Appendix B.4.
-- [Pinned official DIFFA code](https://github.com/NKU-HLT/DIFFA/tree/0a87594e110984fbaf00ebf5bfe5840c212e4438/DIFFA-2).
-- [VidLaDA paper](https://arxiv.org/html/2601.17868v2), Figures 4–5, §4.1, Appendix G.5.
+- [DIFFA-2 paper](https://arxiv.org/html/2601.23161) and [official code](https://github.com/NKU-HLT/DIFFA/tree/0a87594e110984fbaf00ebf5bfe5840c212e4438/DIFFA-2).
+- [VidLaDA paper](https://arxiv.org/html/2601.17868v2), Figures 4–5 and §4.1.
 - [MMAU-Pro dataset](https://huggingface.co/datasets/gamma-lab-umd/MMAU-Pro).
 
-Dataset audio, model weights, local caches and run outputs are excluded from Git.
+Audio, checkpoints, local caches and outputs remain excluded from Git.

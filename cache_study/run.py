@@ -65,8 +65,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--baseline-run',type=Path,required=True)
     p.add_argument('--baseline-manifest',type=Path)
-    p.add_argument('--manifest',type=Path,default=Path('data/mmau50.json'))
-    p.add_argument('--out',type=Path,default=Path('runs/cache50_mean_all'))
+    p.add_argument('--manifest',type=Path,default=Path('data/mmau50_long.json'))
+    p.add_argument('--out',type=Path,default=Path('runs/cache50_long_mean_all'))
     p.add_argument('--diffa-root',type=Path,default=DEFAULT_ROOT)
     p.add_argument('--policies',nargs='+',choices=list(POLICIES),default=list(POLICIES))
     p.add_argument('--cache-layers',default='all',help='all, 16-31, or 16,20,24; zero-based blocks')
@@ -84,7 +84,7 @@ def main():
     if len(set(args.policies)) != len(args.policies):
         raise ValueError('Duplicate cache policy')
     manifest = read_manifest(args.manifest)
-    old_manifest = args.baseline_manifest or args.baseline_run.resolve().parents[1]/'data'/'mmau50.json'
+    old_manifest = args.baseline_manifest or args.baseline_run.resolve().parents[1]/'data'/'mmau50_long.json'
     calibration = calibrate(args.baseline_run,old_manifest,manifest,args.start)
     layers = parse_layers(args.cache_layers)
     expected_models = dict(diffa=[DIFFA_REPO,DIFFA_REVISION],llm=[LLM_REPO,LLM_REVISION],
@@ -168,7 +168,7 @@ def main():
             measured = measure(model,prepared,tokenizer,POLICIES.get(name),layers,start_forward)
             text = measured['output']['text'] if measured['output'] else ''
             measured.update(condition=name,id=row['id'],domain=row['domain'],
-                audio_sha256=row['audio_sha256'],audio_seconds=row['audio_seconds'],
+                audio_sha256=row['audio_sha256'],audio_seconds=row['audio_seconds'],audio_chunks=prepared.audio_chunks,
                 score=grade(text,row['target']),group_tokens={g:len(p) for g,p in prepared.groups().items()},
                 condition_order=order)
             if measured['failed']:

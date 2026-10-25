@@ -7,8 +7,10 @@ if [[ -z "${BASELINE_RUN:-}" ]]; then
   exit 2
 fi
 source scripts/setup.sh
-study_manifest="${MANIFEST:-$PWD/data/mmau50.json}"
-python -u -m drift_study.data --out "$study_manifest" --samples 50
+study_manifest="${MANIFEST:-$PWD/data/mmau50_long.json}"
+audio_duration_args=(--min-seconds "${MIN_SECONDS:-60}")
+if [[ -n "${MAX_SECONDS:-}" ]]; then audio_duration_args+=(--max-seconds "$MAX_SECONDS"); fi
+python -u -m drift_study.data --out "$study_manifest" --samples 50 "${audio_duration_args[@]}"
 cache_reference_args=()
 if [[ -n "${BASELINE_MANIFEST:-}" ]]; then
   cache_reference_args+=(--baseline-manifest "$BASELINE_MANIFEST")
@@ -22,7 +24,7 @@ python -u -m cache_study.run \
   --manifest "$study_manifest" \
   --baseline-run "$BASELINE_RUN" \
   --diffa-root "${DIFFA_ROOT:-$PWD/external/DIFFA}" \
-  --out "${RUN_NAME:-runs/cache50_${cache_start}_${cache_layers//,/_}}" \
+  --out "${RUN_NAME:-runs/cache50_long_${cache_start}_${cache_layers//,/_}}" \
   --samples "$cache_samples" --verify-samples "$cache_verify" \
   --start "$cache_start" --cache-layers "$cache_layers" \
   "${cache_reference_args[@]}"
