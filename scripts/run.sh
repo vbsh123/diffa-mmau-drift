@@ -16,4 +16,6 @@ python -u -m drift_study.run \
   --diffa-root "${DIFFA_ROOT:-$PWD/external/DIFFA}" \
   --samples "$study_samples" \
   --verify-samples "$study_verify" \
-  --pairwise-domains "${PAIRWISE_DOMAINS:-3}"
+  --pairwise-domains "${PAIRWISE_DOMAINS:-3}" \
+  --attention-every "${ATTENTION_EVERY:-1}" \
+  --attention-query-chunk "${ATTENTION_QUERY_CHUNK:-128}"

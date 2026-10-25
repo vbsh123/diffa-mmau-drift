@@ -10,6 +10,7 @@ import time
 import torch
 
 from drift_study.checkout import COMMIT, DEFAULT_ROOT, verify_checkout
+from drift_study.audio_windows import INPUT_PROTOCOL
 from drift_study.data import load_audio, read_manifest
 from drift_study.fpd import generate, output_record
 from drift_study.model import DIFFA_REPO, DIFFA_REVISION, LLM_REPO, LLM_REVISION, load_model, prepare
@@ -17,7 +18,8 @@ from drift_study.protocol import ANSWER_TOKENS, BLOCK_TOKENS, FACTOR, SEED, grad
 from drift_study.run import WHISPER, WHISPER_REVISION
 from drift_study.storage import digest, write_json
 from .engine import PrefixCache
-from .protocol import GROUP_ORDER, POLICIES, benchmark_source_digest, calibrate, parse_layers
+from .protocol import (GROUP_ORDER,POLICIES,benchmark_source_digest,calibrate,parse_layers,
+                       layer_schedule,fixed_start_settings)
 
 
 class ForwardLimit(RuntimeError):
@@ -38,8 +40,8 @@ def watchdog(llm, limit=1024):
         handle.remove()
 
 
-def measure(model, prepared, tokenizer, intervals, layers, start_forward):
-    engine = PrefixCache(model.llm_model,prepared,intervals,layers,start_forward) if intervals else None
+def measure(model,prepared,tokenizer,intervals,layers,start_forward,layer_intervals=None):
+    engine=PrefixCache(model.llm_model,prepared,intervals,layers,start_forward,layer_intervals) if intervals else None
     output, failure = None, None
     torch.cuda.synchronize()
     began = time.perf_counter()
@@ -63,15 +65,20 @@ def measure(model, prepared, tokenizer, intervals, layers, start_forward):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--baseline-run',type=Path,required=True)
+    p.add_argument('--baseline-run',type=Path)
     p.add_argument('--baseline-manifest',type=Path)
     p.add_argument('--manifest',type=Path,default=Path('data/mmau50_long.json'))
-    p.add_argument('--out',type=Path,default=Path('runs/cache50_long_mean_all'))
+    p.add_argument('--out',type=Path,default=Path('runs/cache50_long_forward10_all_deepsem2_24-31'))
     p.add_argument('--diffa-root',type=Path,default=DEFAULT_ROOT)
     p.add_argument('--policies',nargs='+',choices=list(POLICIES),default=list(POLICIES))
     p.add_argument('--cache-layers',default='all',help='all, 16-31, or 16,20,24; zero-based blocks')
-    p.add_argument('--start',choices=['mean','half-mean','immediate'],default='mean')
-    p.add_argument('--samples',type=int,default=50,help='First N of the frozen50; calibration still requires all50')
+    p.add_argument('--start',choices=['fixed','mean','half-mean','immediate'],default='fixed')
+    p.add_argument('--start-forward',type=int,default=10)
+    p.add_argument('--deep-semantic-factor',type=int,default=2)
+    p.add_argument('--deep-semantic-layers',default='24-31')
+    p.add_argument('--allow-legacy-short-cohort',action='store_true',help='Explicitly reuse an existing frozen short-audio manifest; does not select new short clips')
+    p.add_argument('--matched-flat',action='store_true',help='Also run the six unmodified flat controls')
+    p.add_argument('--samples',type=int,default=50,help='First N of the frozen50; mean modes require all50 original baseline results')
     p.add_argument('--verify-samples',type=int,default=2)
     p.add_argument('--preflight-only',action='store_true',help='Validate full calibration without loading models')
     return p
@@ -84,14 +91,30 @@ def main():
     if len(set(args.policies)) != len(args.policies):
         raise ValueError('Duplicate cache policy')
     manifest = read_manifest(args.manifest)
-    old_manifest = args.baseline_manifest or args.baseline_run.resolve().parents[1]/'data'/'mmau50_long.json'
-    calibration = calibrate(args.baseline_run,old_manifest,manifest,args.start)
+    if len(manifest['rows'])!=50 or (manifest['settings'].get('input_protocol')!=INPUT_PROTOCOL and not args.allow_legacy_short_cohort):
+        raise ValueError('Prepare the complete new 50-example long-audio cohort before benchmarking')
+    if args.baseline_run:
+        old_manifest=args.baseline_manifest or args.baseline_run.resolve().parents[1]/'data'/'mmau50_long.json'
+        calibration=calibrate(args.baseline_run,old_manifest,manifest,args.start,args.start_forward)
+    elif args.start=='fixed':
+        calibration=fixed_start_settings(args.start_forward)
+    else:
+        raise ValueError('Mean-based calibration requires --baseline-run; fixed forward10 does not')
     layers = parse_layers(args.cache_layers)
+    deep_layers=parse_layers(args.deep_semantic_layers)
+    specs={}
+    for name in args.policies:
+        base=POLICIES[name]
+        if args.matched_flat or args.deep_semantic_factor==1:
+            specs[name]=dict(base=base,layer_intervals=layer_schedule(base,layers))
+        if args.deep_semantic_factor!=1:
+            specs[f'{name}_deepsem{args.deep_semantic_factor}']=dict(base=base,
+                layer_intervals=layer_schedule(base,layers,deep_layers,args.deep_semantic_factor))
     expected_models = dict(diffa=[DIFFA_REPO,DIFFA_REVISION],llm=[LLM_REPO,LLM_REVISION],
         whisper=[WHISPER,WHISPER_REVISION],lora_alpha=16)
-    if calibration['source_models'] != expected_models:
+    if 'source_models' in calibration and calibration['source_models'] != expected_models:
         raise ValueError('Original model revisions differ from cache benchmark')
-    print(f'Frozen calibration: mean={calibration["mean_forwards"]:.4f} forwards over all50; '
+    print(f'Frozen start: mean={calibration["mean_forwards"]}; '
           f'dense warmup={calibration["dense_warmup_forwards"]}; layers={layers}',flush=True)
     if args.preflight_only:
         print('PREFLIGHT PASSED; no model loaded',flush=True)
@@ -105,11 +128,14 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     rows = manifest['rows'][:args.samples]
-    config = dict(protocol='mmau-fpd128-cache-v1',upstream_commit=COMMIT,
+    config = dict(protocol='mmau-fpd128-layerwise-cache-v2',upstream_commit=COMMIT,
         source_sha256=benchmark_source_digest(),manifest_sha256=digest(args.manifest),
         sample_ids=[r['id'] for r in rows],models=expected_models,
+        input_protocol=manifest['settings'].get('input_protocol','legacy-short'),
         decoder=dict(max_answer_tokens=ANSWER_TOKENS,block_tokens=BLOCK_TOKENS,factor=FACTOR,temperature=0.),
-        policies={name:POLICIES[name] for name in args.policies},group_order=GROUP_ORDER,
+        policies={name:spec['base'] for name,spec in specs.items()},group_order=GROUP_ORDER,
+        layer_intervals={name:spec['layer_intervals'] for name,spec in specs.items()},
+        deep_semantic_factor=args.deep_semantic_factor,deep_semantic_layers=deep_layers,
         cache_layers=layers,calibration=calibration,seed=SEED,verify_samples=args.verify_samples,
         environment=dict(torch=str(torch.__version__),cuda=torch.version.cuda,
             transformers=importlib.metadata.version('transformers'),gpu=torch.cuda.get_device_name(0)),
@@ -133,7 +159,7 @@ def main():
         raise ValueError('Unexpected checkpoint architecture or EOS')
     start_forward = calibration['dense_warmup_forwards']
     warmed,finished,started = False,0,time.monotonic()
-    conditions = ['baseline']+args.policies
+    conditions=['baseline']+list(specs)
     for index,row in enumerate(rows):
         directory = args.out/'samples'/f'{index:05d}'
         directory.mkdir(parents=True,exist_ok=True)
@@ -157,7 +183,9 @@ def main():
         if not warmed:
             print('Process warmup: dense and each cache policy once; cache warmups use immediate reuse',flush=True)
             for name in conditions:
-                warm = measure(model,prepared,tokenizer,POLICIES.get(name),layers,0)
+                spec=specs.get(name)
+                warm=measure(model,prepared,tokenizer,spec['base'] if spec else None,layers,0,
+                             spec['layer_intervals'] if spec else None)
                 if warm['failed']:
                     raise RuntimeError(f'Warmup failed for {name}: {warm["failure"]}')
             warmed = True
@@ -165,7 +193,9 @@ def main():
             if name in saved:
                 continue
             print(f'Question {index+1}/{len(rows)}: {name}, start={start_forward}, layers={args.cache_layers}',flush=True)
-            measured = measure(model,prepared,tokenizer,POLICIES.get(name),layers,start_forward)
+            spec=specs.get(name)
+            measured=measure(model,prepared,tokenizer,spec['base'] if spec else None,layers,start_forward,
+                             spec['layer_intervals'] if spec else None)
             text = measured['output']['text'] if measured['output'] else ''
             measured.update(condition=name,id=row['id'],domain=row['domain'],
                 audio_sha256=row['audio_sha256'],audio_seconds=row['audio_seconds'],audio_chunks=prepared.audio_chunks,
@@ -173,7 +203,7 @@ def main():
                 condition_order=order)
             if measured['failed']:
                 measured['score']['correct'] = False
-            if name == 'baseline':
+            if name=='baseline' and args.baseline_run:
                 old = json.loads((args.baseline_run/'samples'/f'{index:05d}'/'result.json').read_text())
                 measured['matches_original_drift_canvas'] = bool(measured['output'] and
                     measured['output']['canvas_ids'] == old['output']['canvas_ids'])

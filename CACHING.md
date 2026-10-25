@@ -1,153 +1,86 @@
-# Official-FPD cache benchmark
+# Official-FPD layerwise cache benchmark
 
-Same frozen **50 long-audio MMAU-Pro questions** and reasoning prompt as the drift study,
-128 maximum answer tokens, official confidence-adaptive FPD and natural EOS.
-This is a separate package/job, with no changes to `drift_study/` or its source
-fingerprint. It does not modify the running drift experiment or its outputs.
+Default: 50 questions, official confidence-adaptive FPD, up to128 answer tokens,
+zero-based forwards0–9 dense, first reuse at forward10. Each generation starts
+with an empty cache. Fixed start needs no previous drift run or mean estimate.
 
-| Name | Acoustic | Fixed text | Semantic |
-|---|---:|---:|---:|
-| 161616 | 16 | 16 | 16 |
-| 888 | 8 | 8 | 8 |
-| 16816 | 16 | 8 | 16 |
-| 16168 | 16 | 16 | 8 |
-| 323216 | 32 | 32 | 16 |
-| 321632 | 32 | 16 | 32 |
+Intervals below are actual decoder forwards, ordered **acoustic / fixed text /
+semantic**. All32 layers are cached by default. Only semantic refresh changes in
+blocks24–31; it is twice as frequent there.
 
-These are prefix refresh intervals in **actual FPD forwards**, not token counts
-or block counts. All selected layers initially use the same triplet. Every answer
-row is recomputed on every forward, including committed answers and future MASK
-slots. All K/V columns remain present. Original RoPE positions, full embedding,
-final norm and full vocabulary head are retained.
+| Policy | Blocks0–23 | Blocks24–31 |
+|---|---|---|
+| 161616_deepsem2 | 16 /16 /16 | 16 /16 /8 |
+| 888_deepsem2 | 8 /8 /8 | 8 /8 /4 |
+| 16816_deepsem2 | 16 /8 /16 | 16 /8 /8 |
+| 16168_deepsem2 | 16 /16 /8 | 16 /16 /4 |
+| 323216_deepsem2 | 32 /32 /16 | 32 /32 /8 |
+| 321632_deepsem2 | 32 /16 /32 | 32 /16 /16 |
 
-On reuse steps, the selected layers physically skip prefix Q/K/V projections,
-attention queries/output, and MLP rows. They reuse post-RoPE K/V and post-block
-hidden states for those prefix positions. This is approximate bidirectional
-caching; no tokens are pruned and there is no sparse attention mask.
+The dense anchor is forward9. Interval8 refreshes at17,25,…; interval4 at13,17,….
+All answer rows recompute every forward. All key/value columns remain present,
+with original RoPE positions. Prefix Q/K/V projections, attention queries/output
+and MLP rows are physically skipped on reuse steps. Post-RoPE K/V and block outputs
+are reused. This is approximate bidirectional caching without sparse attention.
 
-The old short-input experiment is preserved on branch `short-audio-v1`. Acoustic
-tokens are64 per encoder window in the new complete-clip path, and group positions
-can be noncontiguous. The cache engine uses those actual positions.
+`CACHE_LAYERS=16-31` restricts the cached blocks. Mixed lists/ranges work too.
+`DEEP_SEMANTIC_LAYERS=24-31` and `DEEP_SEMANTIC_FACTOR=2` select the faster semantic
+refresh profile. `DEEP_SEMANTIC_FACTOR=1` restores the flat schedules.
+`MATCHED_FLAT=1` adds all six flat schedules at the same forward10 start, giving
+650 timed generations instead of350. This is the controlled way to isolate the
+layer-specific change from the earlier forward57 start.
 
-## Start from the measured mean
+## One command for all three runs
 
-Default `CACHE_START=mean`:
+Use the command in [README.md](README.md#one-command-for-all-three-runs).
+`scripts/next.sh` runs forward10 layerwise caching on the original frozen MMAU50,
+then on a new50 long-audio cohort, then a separate long drift/attention run.
+Both cache runs have clean baselines. All three jobs run sequentially on the GPU,
+and their result folders are packaged together.
 
-1. Read all **50 completed uncached drift results** and their original manifest.
-2. Verify sample IDs/order, actual WAV hashes, prompts, targets, dataset revision,
-   decoder settings, model revisions, seed, source fingerprint, and forward traces.
-3. Compute the arithmetic mean of actual forward counts and set `M=ceil(mean)`.
-4. Recompute densely for the first M forwards of **every** policy/question.
-   Initialize caches on the last of those dense forwards. On the next forward,
-   begin reuse, refreshing each group every configured interval from that anchor.
+The original manifest defaults to `/workspace/diffa-mmau-drift/data/mmau50.json`.
+Set `ORIGINAL_MANIFEST` if it is elsewhere; its WAVs must still exist. Original
+cohort reuse is explicitly enabled only for the first job. No short sampler or
+new duration cap is introduced. The second/third jobs use `LONG_MANIFEST`, default
+`data/mmau50_long.json`, with complete clips longer than60s and no fixed maximum.
+This new cohort is also MMAU-Pro. All50 IDs, WAV hashes and prompts are frozen.
+Acoustic tokens are64 per encoder window; all projected tokens are preserved.
 
-Example: mean 25.5 gives M=26. Zero-based forwards 0–25 are dense, forward26 can
-reuse, and interval8 refreshes again at forward33 (eight forwards after anchor25).
+For standalone caching on an existing short manifest, use `MANIFEST=...` and
+`ALLOW_LEGACY_SHORT_COHORT=1` with `scripts/cache.sh`. The standard cache command
+prepares/uses the new long cohort.
 
-The threshold is frozen before cache decoding. No question's own future EOS or
-cache-policy answer length is used. The same50 questions provide calibration and
-evaluation, so this is **development data**, not held-out validation.
-
-Short answers ending during the dense phase remain in the results with **zero
-actual reuse**. Their cached path should reproduce the baseline. The report shows
-how many examples actually reused states; do not assume all50 reach M.
-
-Other explicit start modes:
-
-- `CACHE_START=immediate`: first forward initializes caches, subsequent forwards
-  reuse according to the intervals.
-- `CACHE_START=half-mean`: M=ceil(mean/2), otherwise identical semantics.
-
-The default run contains just the selected start mode, not all three modes.
-Different modes and layer selections get separate default output directories.
-
-## Layer selection is ready for the drift findings
-
-Default `CACHE_LAYERS=all` applies caching at all32 transformer blocks. To restrict
-caching to deeper layers later, use e.g. `CACHE_LAYERS=16-31`. Explicit lists such
-as `CACHE_LAYERS=16,20,24` and mixed ranges such as `8-15,24-31` also work.
-
-Indices are **zero-based transformer blocks**, matching the drift measurements;
-block0 is not the embedding. Layers outside the selection recompute all rows
-normally on every forward. There is no hard-coded deep/shallow cutoff or inferred
-layer choice before the drift results are inspected. Each selected layer has its
-own K/V/output cache. Accounting records computed rows separately for every layer.
-
-## Vast command
-
-**Finish the drift job first. Do not run both jobs on the same GPU.** Clone a
-separate checkout for caching; do not pull changes into an active drift checkout.
-Use the new long-audio baseline from the corrected input path, not the old short cohort.
-The original run must retain its `config.json`, `samples/*/result.json`, forward
-traces and frozen manifest, not just the analysis report.
+To run just caching: `bash scripts/cache.sh` after setup. Defaults match the table.
+`SAMPLES=3 RUN_NAME=runs/cache_smoke3` gives a smoke run from the frozen50 cohort.
+Preflight without a GPU/model load:
 
 ```bash
-cd /workspace
-git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-long-cache
-cd diffa-mmau-long-cache
-nohup env \
-  SKIP_INSTALL=1 \
-  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
-  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
-  BASELINE_RUN=/workspace/diffa-mmau-long/runs/mmau50_long_fpd128 \
-  bash scripts/cache.sh > cache50_long_mean_all.log 2>&1 &
-tail -f cache50_long_mean_all.log
+python -m cache_study.run --manifest data/mmau50_long.json --preflight-only
 ```
 
-This reuses the installed environment and official source. HF model downloads
-are reused through the normal shared cache. The new checkout prepares the same
-small deterministic audio cohort independently. If the paths differ, adjust them.
-`BASELINE_MANIFEST` overrides the assumed original `<drift-repo>/data/mmau50_long.json`.
-On a new machine omit `SKIP_INSTALL=1` and `AUDIO_VENV` to install dependencies.
+The older `CACHE_START=mean`, `half-mean` and `immediate` modes remain available
+through `scripts/cache.sh` with `BASELINE_RUN` pointing to a complete matching
+50-question drift run. Historical-source validation is strict: changed source,
+cohort, prompts, models or decoder settings are rejected. Fixed start avoids this
+dependency. Old short-input source is preserved on branch `short-audio-v1`.
 
-All50 baseline results are required before any model loading. To inspect the
-resolved mean/start point without loading a model:
+## Timing and verification
 
-```bash
-source /workspace/diffa-mmau-drift/.venv/bin/activate
-python -m cache_study.run \
-  --baseline-run /workspace/diffa-mmau-long/runs/mmau50_long_fpd128 \
-  --manifest data/mmau50_long.json --preflight-only
-```
+Each question has one fresh baseline and six policy generations, in deterministically
+shuffled order. Process warmups are excluded. First two questions additionally
+require exact canvas IDs/NFE from refresh-every-forward identity caching.
+No observation probes or scoring/file I/O enter decode timers. Cache setup and GPU
+synchronization are included. A1024-forward watchdog records failures without
+forcing commits. Failures remain incorrect in quality results.
 
-For a three-question smoke run add `SAMPLES=3 RUN_NAME=runs/cache_smoke3` to the
-`env` command. Calibration still requires all50 completed original questions.
-For a later deep-layer experiment add `CACHE_LAYERS=16-31` after choosing the
-range from the drift results. The default output becomes `runs/cache50_long_mean_16-31`.
+Outputs retain final texts/IDs, strict grades, EOS/capacity flags, forward counts,
+seconds, actual reuse forwards, per-layer refresh counts and computed rows.
+Each completed condition saves immediately and resumes only under an identical
+source/config/environment. New settings require a fresh output folder.
+`analysis/report.md`, `summary.json` and `pairs.csv` update after each condition.
+Speedup uses clean paired baseline/cache timings. Answer lengths/NFE may change,
+so these are autonomous generation timings rather than equal-work replay.
 
-## Timing, verification and outputs
-
-- **350 timed generations**: one fresh uncached baseline and six cache policies
-  on each of50 questions. Conditions are shuffled deterministically per question.
-- One process warmup per condition, not per question. Cache warmups use immediate
-  reuse to exercise the cache path; their outputs/times never enter quality/timing
-  aggregates. One clean timed generation per condition; no timed repeats.
-- First two questions additionally check refresh-every-forward identity caching
-  against current baseline, requiring exact full canvas IDs and forward count.
-- Every generation starts with an empty cache. Actual generation uses the same
-  untouched official FPD function, with confidence-adaptive commits and natural EOS.
-- No drift/attention probes, activation histories, fixed-input replay, scoring,
-  or file I/O inside decode timers. Cache setup/management and synchronization
-  are included. A 1024-forward watchdog aborts a stalled decode without forcing
-  commits; failures remain incorrect in accuracy and are counted explicitly.
-- The historical instrumented drift timing is **never** used for speedup. Its
-  forward counts calibrate M. Fresh baseline outputs are compared with saved
-  drift outputs and the match flag is recorded.
-- Final texts/IDs, grades, EOS/capacity flags, lengths, forward counts, seconds,
-  refresh counts, actual reuse forwards, per-layer row work and policy order are
-  saved immediately per completed condition. An unchanged rerun resumes those
-  conditions without rerunning their timed measurements. New source/settings need
-  a fresh output root.
-
-Read `runs/cache50_long_mean_all/analysis/report.md`, `summary.json`, and `pairs.csv`.
-Reports update after each condition. Paired losses/recoveries use common examples;
-paired latency speedup uses successful baseline/cache pairs. Failures remain in
-accuracy but are excluded from speed/TPS, with sample counts exposed. Autonomous
-generation lengths and NFE can change, so latency is not an equal-work replay.
-
-CPU tests compare physical row skipping to an independent dense stale-K/V and
-stale-output reference for every requested schedule, both immediate/delayed starts,
-and all/deep-only layer selections. They check that uncached layers and all answer
-rows stay fresh, late-start/no-reuse outputs are exact, BF16 matches the reference,
-and native FPD identity caching preserves output IDs/NFE. Full-model GPU quality
-and speed remain to be measured.
+CPU tests compare physical skipping against an independent dense stale-K/V/output
+reference for all six layerwise schedules, delayed starts and BF16. Native FPD
+identity output/NFE is checked. Full-checkpoint GPU quality/speed need the Vast run.

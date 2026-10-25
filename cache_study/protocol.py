@@ -39,7 +39,11 @@ def parse_layers(value, count=32):
     return sorted(selected)
 
 
-def start_from_mean(mean, mode):
+def start_from_mean(mean,mode,fixed_forward=10):
+    if mode=='fixed':
+        if fixed_forward<0:
+            raise ValueError('Fixed start forward must be nonnegative')
+        return fixed_forward
     if mode == 'immediate':
         return 0
     if mode == 'mean':
@@ -57,7 +61,7 @@ def benchmark_source_digest():
     return hasher.hexdigest()
 
 
-def calibrate(baseline_run, baseline_manifest, manifest, mode='mean'):
+def calibrate(baseline_run,baseline_manifest,manifest,mode='mean',fixed_forward=10):
     """Require the complete original 50; do not estimate from partial results."""
     baseline_run, baseline_manifest = Path(baseline_run), Path(baseline_manifest)
     config = json.loads((baseline_run/'config.json').read_text())
@@ -99,8 +103,22 @@ def calibrate(baseline_run, baseline_manifest, manifest, mode='mean'):
         records.append(dict(id=row['id'],forward_count=nfe,result_sha256=digest(result_path)))
     mean = sum(counts)/len(counts)
     return dict(n=50, mean_forwards=mean, start_mode=mode,
-        dense_warmup_forwards=start_from_mean(mean,mode),
-        first_reuse_zero_based_forward=max(1,start_from_mean(mean,mode)),
+        dense_warmup_forwards=start_from_mean(mean,mode,fixed_forward),
+        first_reuse_zero_based_forward=max(1,start_from_mean(mean,mode,fixed_forward)),
         calibration_config_sha256=digest(baseline_run/'config.json'),
         source_models=config['models'], records=records,
         note='Development calibration uses the same 50 questions; not held-out or per-example EOS-aware scheduling.')
+
+
+def layer_schedule(base,layers,deep_layers=(),semantic_factor=1):
+    if semantic_factor<1 or base[2]%semantic_factor:
+        raise ValueError('Semantic factor must divide the base semantic interval exactly')
+    return {layer:(base[0],base[1],base[2]//semantic_factor if layer in deep_layers else base[2])
+            for layer in layers}
+
+
+def fixed_start_settings(forward=10):
+    value=start_from_mean(None,'fixed',forward)
+    return dict(n=0,mean_forwards=None,start_mode='fixed',dense_warmup_forwards=value,
+        first_reuse_zero_based_forward=max(1,value),records=[],
+        note='Fixed start chosen before decoding; no mean or per-example future EOS is used.')

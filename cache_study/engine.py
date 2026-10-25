@@ -5,7 +5,7 @@ import torch
 
 
 class PrefixCache(AbstractContextManager):
-    def __init__(self, llm, prepared, intervals=(16,16,16), layers=None, start_forward=0):
+    def __init__(self,llm,prepared,intervals=(16,16,16),layers=None,start_forward=0,layer_intervals=None):
         self.blocks = list(llm.model.transformer.blocks)
         if llm.training or len(self.blocks)!=llm.config.n_layers or len(intervals)!=3 or min(intervals)<1:
             raise ValueError('Requires eval-mode ungrouped LLaDA and three positive intervals')
@@ -23,6 +23,14 @@ class PrefixCache(AbstractContextManager):
         if sorted(positions) != list(range(prepared.prefix_length)):
             raise ValueError('Prefix groups overlap or have gaps')
         self.intervals = tuple(intervals)
+        self.layer_intervals={layer:tuple(intervals) for layer in self.layers}
+        if layer_intervals is not None:
+            if set(layer_intervals)!=self.layers:
+                raise ValueError('Layer interval overrides must cover exactly the cached layers')
+            for layer,values in layer_intervals.items():
+                if len(values)!=3 or any(not isinstance(v,int) or v<1 for v in values):
+                    raise ValueError('Each layer requires three positive integer intervals')
+                self.layer_intervals[layer]=tuple(values)
         self.step, self.length = -1, None
         self.banks, self.patterns, self.originals, self.events = {}, {}, [], []
         self.pattern_ids, self.active_ids_by_layer = {}, {}
@@ -43,8 +51,7 @@ class PrefixCache(AbstractContextManager):
                             _layer=layer,_block=block,_original=original):
                     if x.shape[0]!=1 or attention_bias is not None or layer_past is not None or use_cache or replace_position is not None:
                         raise ValueError('Requires batch-one bidirectional no-past inference')
-                    active=self.active
-                    self.active_ids_by_layer[_layer]=self.pattern_ids[self.events[-1]['refresh']]
+                    active=self.active_by_layer[_layer]
                     if self.step < self.anchor:
                         return _original(x)
                     if len(active)==self.length:
@@ -105,14 +112,20 @@ class PrefixCache(AbstractContextManager):
             self.length = x.shape[1]
         if x.shape[1] != self.length:
             raise ValueError('FPD canvas length changed')
-        due = tuple(self.step <= self.anchor or (self.step-self.anchor)%r == 0 for r in self.intervals)
-        if due not in self.patterns:
-            inactive = {p for group,refresh in zip(self.groups,due) if not refresh for p in group}
-            selected = [p for p in range(self.length) if p not in inactive]
-            self.pattern_ids[due] = tuple(selected)
-            self.patterns[due] = torch.tensor(selected,device=x.device,dtype=torch.long)
-        self.active = self.patterns[due]
-        self.events.append(dict(step=self.step,refresh=due,computed_rows=len(self.active)))
+        self.active_by_layer={}
+        refresh,computed={},{}
+        for layer,intervals in self.layer_intervals.items():
+            due=tuple(self.step<=self.anchor or (self.step-self.anchor)%r==0 for r in intervals)
+            if due not in self.patterns:
+                inactive={p for group,fresh in zip(self.groups,due) if not fresh for p in group}
+                selected=[p for p in range(self.length) if p not in inactive]
+                self.pattern_ids[due]=tuple(selected)
+                self.patterns[due]=torch.tensor(selected,device=x.device,dtype=torch.long)
+            self.active_by_layer[layer]=self.patterns[due]
+            self.active_ids_by_layer[layer]=self.pattern_ids[due]
+            refresh[layer]=due
+            computed[layer]=len(self.patterns[due])
+        self.events.append(dict(step=self.step,refresh_by_layer=refresh,computed_by_layer=computed))
 
     def __exit__(self,*args):
         if self.handle is not None:
@@ -126,17 +139,18 @@ class PrefixCache(AbstractContextManager):
         self.originals.clear()
 
     def accounting(self):
-        selected_used = sum(e['computed_rows'] for e in self.events)
         ordinary_used = len(self.events)*(self.length or 0)
-        used = selected_used*len(self.layers)+ordinary_used*(len(self.blocks)-len(self.layers))
+        per_layer={layer:sum(e['computed_by_layer'][layer] for e in self.events)
+                   if layer in self.layers else ordinary_used for layer in range(len(self.blocks))}
+        used=sum(per_layer.values())
         dense=len(self.events)*(self.length or 0)*len(self.blocks)
         return dict(forwards=len(self.events),computed_token_layers=used,dense_token_layers=dense,
                     cache_layers=sorted(self.layers), dense_warmup_forwards=self.start_forward,
-                    actual_reuse_forwards=sum(e['computed_rows'] < self.length for e in self.events),
-                    per_layer_computed_rows={str(layer):selected_used if layer in self.layers else ordinary_used
-                                             for layer in range(len(self.blocks))},
+                    actual_reuse_forwards=sum(any(n<self.length for n in e['computed_by_layer'].values()) for e in self.events),
+                    per_layer_computed_rows={str(layer):value for layer,value in per_layer.items()},
+                    layer_intervals={str(layer):values for layer,values in self.layer_intervals.items()},
                     skipped_token_update_fraction=1-used/max(1,dense),
-                    refresh_counts={g:sum(e['refresh'][i] for e in self.events)
-                                    for i,g in enumerate(('acoustic','text','semantic'))},
+                    refresh_counts_by_layer={str(layer):{g:sum(e['refresh_by_layer'][layer][i] for e in self.events)
+                        for i,g in enumerate(('acoustic','text','semantic'))} for layer in self.layers},
                     note='Only fixed-prefix QKV/query/MLP rows are skipped. All KV columns and answer rows remain; '
                          'original positions, full embedding, final norm and vocabulary head are retained.')

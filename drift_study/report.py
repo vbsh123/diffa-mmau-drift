@@ -170,6 +170,8 @@ def analyze(out, plots=False):
         'adjacent and initial-reference measurements cover every block on every example.', '']
     if plots:
         plot(samples, destination)
+        from .attention_report import analyze as attention_analyze
+        attention_analyze(out,plots=True)
     (destination/'report.md').write_text('\n'.join(lines))
     return summary
 

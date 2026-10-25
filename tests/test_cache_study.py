@@ -12,8 +12,9 @@ import soundfile as sf
 import torch
 
 from cache_study.engine import PrefixCache
-from cache_study.protocol import POLICIES, benchmark_source_digest, calibrate, parse_layers, start_from_mean
-from cache_study.run import measure
+from cache_study.protocol import (POLICIES,benchmark_source_digest,calibrate,parse_layers,start_from_mean,
+                                  layer_schedule,fixed_start_settings)
+from cache_study.run import measure,parser
 from drift_study.protocol import prompt_for
 from drift_study.storage import digest, source_digest, write_json
 import test_study as reference_tests
@@ -63,13 +64,24 @@ class CacheProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'all 50 completed'):
                 calibrate(run,path,manifest)
 
+    def test_forward10_and_exact_deep_semantic_profiles(self):
+        args=parser().parse_args([])
+        self.assertEqual((args.start,args.start_forward,args.deep_semantic_factor,args.deep_semantic_layers),
+                         ('fixed',10,2,'24-31'))
+        self.assertIsNone(fixed_start_settings(10)['mean_forwards'])
+        self.assertEqual(fixed_start_settings(10)['first_reuse_zero_based_forward'],10)
+        for base,expected in zip(POLICIES.values(),[(16,16,8),(8,8,4),(16,8,8),(16,16,4),(32,32,8),(32,16,16)]):
+            schedule=layer_schedule(base,list(range(32)),list(range(24,32)),2)
+            for layer in range(32):
+                self.assertEqual(schedule[layer],expected if layer>=24 else base)
+
 
 @unittest.skipUnless(os.environ.get('DIFFA_ROOT'),'Set DIFFA_ROOT to pinned official checkout')
 class CacheEngineTests(unittest.TestCase):
     def setUp(self):
         reference_tests.OfficialFPDTests.setUp(self)
 
-    def install_dense_reference(self,llm,intervals,layers,start):
+    def install_dense_reference(self,llm,intervals,layers,start,layer_intervals=None):
         banks={}
         clock=[0]
         groups=[self.prepared.groups()[g] for g in ('acoustic','text','semantic')]
@@ -78,10 +90,11 @@ class CacheEngineTests(unittest.TestCase):
             if layer not in layers:
                 continue
             attention=block._scaled_dot_product_attention
-            def inactive():
-                return [p for group,interval in zip(groups,intervals)
+            chosen=layer_intervals[layer] if layer_intervals is not None else intervals
+            def inactive(chosen=chosen):
+                return [p for group,interval in zip(groups,chosen)
                         if clock[0]>anchor and (clock[0]-anchor)%interval for p in group]
-            def attend(q,k,v,attn_mask=None,dropout_p=0.,is_causal=False,layer=layer,attention=attention):
+            def attend(q,k,v,attn_mask=None,dropout_p=0.,is_causal=False,layer=layer,attention=attention,inactive=inactive):
                 skipped=inactive()
                 if skipped:
                     k,v=k.clone(),v.clone()
@@ -91,7 +104,7 @@ class CacheEngineTests(unittest.TestCase):
                 banks[layer]=[k.clone(),v.clone(),previous]
                 return attention(q,k,v,attn_mask=attn_mask,dropout_p=dropout_p,is_causal=is_causal)
             block._scaled_dot_product_attention=attend
-            def hidden(module,args,output,layer=layer):
+            def hidden(module,args,output,layer=layer,inactive=inactive):
                 current=output[0].clone()
                 skipped=inactive()
                 if skipped:
@@ -179,6 +192,30 @@ class CacheEngineTests(unittest.TestCase):
                 inputs=torch.randn(1,self.prepared.prefix_length+4,16).bfloat16()
                 torch.testing.assert_close(tested(inputs_embeds=inputs).logits,
                                            reference(inputs_embeds=inputs).logits,atol=.02,rtol=.02)
+
+    @torch.no_grad()
+    def test_layer_specific_semantic_refresh_and_forward10_against_dense_reference(self):
+        for base in POLICIES.values():
+            tested=deepcopy(self.llm).float()
+            reference=deepcopy(self.llm).float()
+            schedule=layer_schedule(base,[0,1],[1],2)
+            clock=self.install_dense_reference(reference,base,[0,1],10,schedule)
+            with PrefixCache(tested,self.prepared,base,[0,1],10,schedule) as cache:
+                for step in range(45):
+                    clock[0]=step
+                    torch.manual_seed(900+step)
+                    inputs=torch.randn(1,self.prepared.prefix_length+4,16)
+                    torch.testing.assert_close(tested(inputs_embeds=inputs).logits,
+                        reference(inputs_embeds=inputs).logits,atol=3e-6,rtol=3e-6)
+            account=cache.accounting()
+            self.assertEqual(account['actual_reuse_forwards'],35-35//max(base))
+            for layer in (0,1):
+                for index,group in enumerate(('acoustic','text','semantic')):
+                    interval=schedule[layer][index]
+                    expected=sum(step<=9 or (step-9)%interval==0 for step in range(45))
+                    self.assertEqual(account['refresh_counts_by_layer'][str(layer)][group],expected)
+            self.assertGreater(account['refresh_counts_by_layer']['1']['semantic'],
+                               account['refresh_counts_by_layer']['0']['semantic'])
 
 
 class CacheReportTests(unittest.TestCase):

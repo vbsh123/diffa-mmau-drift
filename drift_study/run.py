@@ -1,5 +1,6 @@
 """Run the 128-token official-FPD drift pilot on a frozen MMAU-Pro manifest."""
 import argparse
+from contextlib import ExitStack
 import importlib.metadata
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import time
 import torch
 
 from .audio_windows import INPUT_PROTOCOL
+from .attention import AttentionRecorder
 from .checkout import COMMIT, DEFAULT_ROOT, verify_checkout
 from .data import load_audio, read_manifest
 from .fpd import generate, output_record, save_trace
@@ -32,6 +34,8 @@ def parser():
     p.add_argument('--verify-samples', type=int, default=2)
     p.add_argument('--pairwise-domains', type=int, choices=(0, 1, 2, 3), default=3,
                    help='First example in each of the first N domains gets full step-pair matrices')
+    p.add_argument('--attention-every',type=int,default=1,help='Attention summaries every N forwards; 0 disables')
+    p.add_argument('--attention-query-chunk',type=int,default=128)
     return p
 
 
@@ -39,6 +43,8 @@ def main():
     args = parser().parse_args()
     if args.samples < 1 or not 0 <= args.verify_samples <= args.samples:
         raise ValueError('Invalid sample or verification count')
+    if args.attention_every<0 or args.attention_query_chunk<1:
+        raise ValueError('Invalid attention observation settings')
     manifest = read_manifest(args.manifest)
     if manifest['settings'].get('input_protocol') != INPUT_PROTOCOL:
         raise ValueError('Prepare a fresh complete-clip long-audio manifest; old short cohorts are not reused')
@@ -57,6 +63,7 @@ def main():
         upstream_commit=COMMIT, manifest_sha256=digest(args.manifest),
         dataset=manifest['dataset'], dataset_revision=manifest['revision'],
         input_protocol=INPUT_PROTOCOL, audio_selection=manifest['settings'],
+        attention=dict(every=args.attention_every,query_chunk=args.attention_query_chunk),
         sample_ids=[r['id'] for r in rows], seed=args.seed,
         decoder=dict(name='official DIFFA-2 fast_dllm FPD', factor=FACTOR,
             max_answer_tokens=ANSWER_TOKENS, block_tokens=BLOCK_TOKENS, temperature=0.,
@@ -117,8 +124,13 @@ def main():
               f'groups={ {g:len(p) for g,p in prepared.groups().items()} }', flush=True)
         torch.cuda.synchronize()
         began = time.monotonic()
-        with HiddenRecorder(model.llm_model, prepared, directory, row['id'] in exemplars) as recorder:
-            output, nfe, trace = generate(model, prepared)
+        attention=None
+        with ExitStack() as stack:
+            recorder=stack.enter_context(HiddenRecorder(model.llm_model,prepared,directory,row['id'] in exemplars))
+            if args.attention_every:
+                attention=stack.enter_context(AttentionRecorder(model.llm_model,prepared,directory,
+                    every=args.attention_every,query_chunk=args.attention_query_chunk))
+            output,nfe,trace=generate(model,prepared,observer=attention)
         torch.cuda.synchronize()
         instrumented_seconds = time.monotonic()-began
         if nfe != recorder.step+1:
@@ -133,7 +145,11 @@ def main():
             raise ValueError('Official FPD ended with unresolved visible masks')
         save_trace(directory/'trace.jsonl', trace)
         recorder.finalize()
+        if attention:
+            attention.finalize()
         artifacts = ['trace.jsonl', 'drift.jsonl', 'measurement.json']
+        if attention:
+            artifacts+=['attention.jsonl','attention_measurement.json']
         if (directory/'pairwise.npz').exists():
             artifacts.append('pairwise.npz')
         write_json(result_path, dict(id=row['id'], domain=row['domain'], audio_sha256=row['audio_sha256'],

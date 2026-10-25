@@ -67,9 +67,10 @@ def analyze(out):
     fmt = lambda n:'N/A' if n is None else f'{n:.4f}'
     calibration = config['calibration']
     lines = ['# MMAU-Pro FPD cache benchmark','',
-        f'Calibration: {calibration["mean_forwards"]:.4f} mean forwards over the original complete50; '
+        f'Calibration mean: {calibration["mean_forwards"]}; '
         f'start={calibration["start_mode"]}; dense warmup={calibration["dense_warmup_forwards"]}.',
         f'Cache layers (zero-based block outputs): {config["cache_layers"]}.',
+        f'Deep semantic factor: {config.get("deep_semantic_factor",1)}; blocks: {config.get("deep_semantic_layers",[])}.',
         'Schedule order: acoustic / fixed text / semantic. Other layers stay dense.','',
         '| Policy | N | Accuracy | Failures | TPS | Paired latency speedup | Reuse examples | Losses / recoveries |',
         '|---|---:|---:|---:|---:|---:|---:|---:|']
@@ -79,7 +80,7 @@ def analyze(out):
             f'{row["examples_with_actual_reuse"]} | {row["losses"]} / {row["recoveries"]} |')
     lines += ['','Clean current baseline and all cache policies run on the same GPU with shuffled question-wise condition order.',
         'One synchronized timed autonomous decode per condition/question; audio preparation and scoring are outside timers.',
-        'Mean-start is calibrated on the same50 development questions, not held-out validation.',
+        'Fixed start is chosen before decoding. Mean-based modes, when used, are development calibration on the same50.',
         'Examples ending during dense warmup receive no cache reuse and remain in the primary accuracy results.',
         'Failed decodes remain incorrect in accuracy; speed/TPS use successful runs, with paired successful counts in summary.json.',
         'Output lengths and forward counts can change; autonomous latency speedup is not equal-work replay.',

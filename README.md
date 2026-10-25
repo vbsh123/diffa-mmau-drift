@@ -109,7 +109,14 @@ All answers, including incorrect/capacity-limited answers, remain in the analysi
 Step-pair matrices use the first example of each domain, selected beforehand,
 at blocks 0, 7, 15, 23, 31. BF16 states are saved losslessly to temporary scratch;
 small token chunks are expanded for pairwise computation and scratch is deleted.
-No full attention matrices are collected. Timings include observation overhead
+Attention is also measured by default at every layer and forward. FP32 softmax
+weights are reconstructed from actual post-RoPE queries/keys, over all heads and
+positions, in bounded query chunks. Native SDPA outputs remain unchanged. Saved
+summaries separate acoustic, semantic, fixed text, masked answer and decoded
+answer queries/keys. Raw mass and mass relative to a uniform distribution over
+positions are both reported; larger key groups naturally receive more raw mass.
+Full attention matrices are not saved. `ATTENTION_EVERY=4` observes every fourth
+forward; `ATTENTION_EVERY=0` disables attention only. Timings include observation overhead
 and must not be reported as clean inference throughput.
 
 VidLaDA Figures 4–5 motivate the cosine matrices and layer/step heatmaps. Its
@@ -136,9 +143,43 @@ Package outputs:
 tar -czf mmau50_long_fpd128.tar.gz -C runs mmau50_long_fpd128
 ```
 
-The separate [cache benchmark](CACHING.md) supports the six requested triplets,
-mean/half-mean/immediate start, and all/shallow/deep layer selections. It needs a
-**new complete long-audio baseline**, never the old 56.3-forward short baseline.
+The [cache benchmark](CACHING.md) defaults to forward10 and twice as frequent
+semantic refresh in blocks24–31 for all six requested policies. It times a fresh
+baseline without drift/attention probes. Fixed start needs no historical baseline.
+
+## One command for all three runs
+
+Clone into a new folder so active/older runs remain resumable. Existing Vast
+installation/source paths are reused below; adjust them if your paths differ.
+On a fresh machine omit `SKIP_INSTALL=1` and `AUDIO_VENV`.
+
+```bash
+cd /workspace
+git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-next
+cd diffa-mmau-next
+nohup env SKIP_INSTALL=1 \
+  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
+  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
+  bash scripts/next.sh > next.log 2>&1 &
+tail -f next.log
+```
+
+Job1 runs the six forward10 layerwise caches plus a fresh baseline on the original
+MMAU50. Job2 repeats on the new long-audio50, with its own fresh baseline. Job3
+separately measures all32 layers' drift and attention on that long cohort.
+The original frozen manifest and WAVs must still exist at
+`/workspace/diffa-mmau-drift/data/mmau50.json`; set `ORIGINAL_MANIFEST` if elsewhere.
+Every hash/prompt is checked before inference. The new long cohort is prepared
+automatically and is also MMAU-Pro, with different longer clips.
+Output folders are `runs/cache50_original_forward10_all_deepsem2_24-31`,
+`runs/cache50_long_forward10_all_deepsem2_24-31`, and
+`runs/mmau50_long_fpd128_attention`. Finished results are bundled in
+`runs/next_results.tar.gz`. Every completed question/condition resumes under
+unchanged source/settings. The command stops on a failed job and resumes when
+rerun after resolving it. Measurements can take substantially longer than clean
+inference because attention reconstruction includes all queries/keys/heads.
+`analysis/attention_report.md`, `attention_summary.json` and three per-layer
+attention figures supplement the drift figures.
 
 ## Verification and references
 
