@@ -169,12 +169,18 @@ MMAU50. Job2 repeats on the new long-audio50, with its own fresh baseline. Job3
 separately measures all32 layers' drift and attention on that long cohort.
 The original frozen manifest and WAVs must still exist at
 `/workspace/diffa-mmau-drift/data/mmau50.json`; set `ORIGINAL_MANIFEST` if elsewhere.
-Every hash/prompt is checked before inference. The new long cohort is prepared
+Every hash/prompt is checked before inference. The launcher fixes50 questions,
+all32 cache layers, forward10, the deep semantic factor2, and every-forward
+attention regardless of stale shell overrides. It clears any inherited duration
+maximum. Use the individual scripts for deliberately different experiments. The new long cohort is prepared
 automatically and is also MMAU-Pro, with different longer clips.
 Output folders are `runs/cache50_original_forward10_all_deepsem2_24-31`,
 `runs/cache50_long_forward10_all_deepsem2_24-31`, and
 `runs/mmau50_long_fpd128_attention`. Finished results are bundled in
-`runs/next_results.tar.gz`. Every completed question/condition resumes under
+`runs/next_results.tar.gz`. Each output folder retains an exact `cohort.json` manifest. The final drift run
+also requires matching output IDs, NFE, token groups and window coverage against
+the clean long cache baseline on every question; a mismatch stops the run.
+Every completed question/condition resumes under
 unchanged source/settings. The command stops on a failed job and resumes when
 rerun after resolving it. Measurements can take substantially longer than clean
 inference because attention reconstruction includes all queries/keys/heads.

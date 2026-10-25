@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 from pathlib import Path
 import random
+import shutil
 import time
 
 import torch
@@ -152,6 +153,12 @@ def main():
     else:
         write_json(config_path,config)
     write_json(args.out/'calibration.json',calibration)
+    frozen_manifest=args.out/'cohort.json'
+    if frozen_manifest.exists():
+        if digest(frozen_manifest)!=config['manifest_sha256']:
+            raise ValueError('Frozen output cohort manifest was changed')
+    else:
+        shutil.copyfile(args.manifest,frozen_manifest)
     model,tokenizer,extractor,load_report = load_model(args.diffa_root,
         DIFFA_REPO,DIFFA_REVISION,LLM_REPO,LLM_REVISION,WHISPER,WHISPER_REVISION)
     write_json(args.out/'model_load.json',load_report)

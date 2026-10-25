@@ -10,6 +10,8 @@ python -u -m drift_study.data --out "$study_manifest" --samples "${COHORT_SAMPLE
 study_samples="${SAMPLES:-50}"
 study_verify="${VERIFY_SAMPLES:-2}"
 if (( study_verify > study_samples )); then study_verify="$study_samples"; fi
+drift_reference_args=()
+if [[ -n "${CACHE_REFERENCE_RUN:-}" ]]; then drift_reference_args+=(--cache-reference-run "$CACHE_REFERENCE_RUN"); fi
 python -u -m drift_study.run \
   --manifest "$study_manifest" \
   --out "${RUN_NAME:-runs/mmau50_long_fpd128}" \
@@ -18,4 +20,5 @@ python -u -m drift_study.run \
   --verify-samples "$study_verify" \
   --pairwise-domains "${PAIRWISE_DOMAINS:-3}" \
   --attention-every "${ATTENTION_EVERY:-1}" \
-  --attention-query-chunk "${ATTENTION_QUERY_CHUNK:-128}"
+  --attention-query-chunk "${ATTENTION_QUERY_CHUNK:-128}" \
+  "${drift_reference_args[@]}"

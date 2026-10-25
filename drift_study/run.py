@@ -24,6 +24,16 @@ WHISPER = 'openai/whisper-large-v3'
 WHISPER_REVISION = '06f233fe06e710322aca913c1bc4249a0d71fce1'
 
 
+def verify_cache_reference(record,reference):
+    if (reference['failed'] or reference['id']!=record['id']
+            or reference['audio_sha256']!=record['audio_sha256']
+            or reference['forward_count']!=record['forward_count']
+            or reference['output']['canvas_ids']!=record['output']['canvas_ids']
+            or reference['group_tokens']!=record['group_tokens']
+            or reference['audio_chunks']!=record['audio_chunks']):
+        raise ValueError('Measured drift run differs from the clean cache baseline; refusing mixed results')
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', type=Path, default=Path('data/mmau50_long.json'))
@@ -34,6 +44,7 @@ def parser():
     p.add_argument('--verify-samples', type=int, default=2)
     p.add_argument('--pairwise-domains', type=int, choices=(0, 1, 2, 3), default=3,
                    help='First example in each of the first N domains gets full step-pair matrices')
+    p.add_argument('--cache-reference-run',type=Path,help='Require matching clean cache baseline on every measured question')
     p.add_argument('--attention-every',type=int,default=1,help='Attention summaries every N forwards; 0 disables')
     p.add_argument('--attention-query-chunk',type=int,default=128)
     return p
@@ -74,6 +85,18 @@ def main():
         environment=dict(python=platform.python_version(), torch=torch.__version__,
             transformers=importlib.metadata.version('transformers'),
             cuda=torch.version.cuda, gpu=torch.cuda.get_device_name(0)))
+    if args.cache_reference_run:
+        reference_config=json.loads((args.cache_reference_run/'config.json').read_text())
+        if any(reference_config[key]!=config[key] for key in
+               ('manifest_sha256','sample_ids','models','seed')):
+            raise ValueError('Cache reference cohort/model/seed differs from drift run')
+        reference_decoder=reference_config['decoder']
+        if any(reference_decoder[key]!=config['decoder'][key] for key in
+               ('max_answer_tokens','block_tokens','factor','temperature')):
+            raise ValueError('Cache reference decoder differs from drift run')
+        config['cache_reference']=dict(config_sha256=digest(args.cache_reference_run/'config.json'),
+            baseline_sha256={str(i):digest(args.cache_reference_run/'samples'/f'{i:05d}'/'baseline.json')
+                             for i in range(len(rows))})
     args.out.mkdir(parents=True, exist_ok=True)
     config_path = args.out/'config.json'
     if config_path.exists():
@@ -83,6 +106,12 @@ def main():
         raise ValueError('Output directory has no matching config')
     else:
         write_json(config_path, config)
+    frozen_manifest=args.out/'cohort.json'
+    if frozen_manifest.exists():
+        if digest(frozen_manifest)!=config['manifest_sha256']:
+            raise ValueError('Frozen output cohort manifest was changed')
+    else:
+        shutil.copyfile(args.manifest,frozen_manifest)
     model, tokenizer, extractor, load_report = load_model(args.diffa_root,
         DIFFA_REPO, DIFFA_REVISION, LLM_REPO, LLM_REVISION, WHISPER, WHISPER_REVISION)
     write_json(args.out/'model_load.json', load_report)
@@ -105,6 +134,9 @@ def main():
             for name, expected in saved['artifact_sha256'].items():
                 if digest(directory/name) != expected:
                     raise ValueError('Existing sample artifact changed or corrupted')
+            if args.cache_reference_run:
+                reference=json.loads((args.cache_reference_run/'samples'/f'{index:05d}'/'baseline.json').read_text())
+                verify_cache_reference(saved,reference)
             print(f'Skip complete {index+1}/{len(rows)}: {row["id"]}', flush=True)
             continue
         if directory.exists():
@@ -152,12 +184,17 @@ def main():
             artifacts+=['attention.jsonl','attention_measurement.json']
         if (directory/'pairwise.npz').exists():
             artifacts.append('pairwise.npz')
-        write_json(result_path, dict(id=row['id'], domain=row['domain'], audio_sha256=row['audio_sha256'],
+        result=dict(id=row['id'], domain=row['domain'], audio_sha256=row['audio_sha256'],
             audio_seconds=row['audio_seconds'], audio_chunks=prepared.audio_chunks, source_index=index, output=record,
             score=grade(record['text'], row['target']), forward_count=nfe,
             untouched_fpd_verified=verified, group_tokens={g:len(p) for g,p in prepared.groups().items()},
             instrumented_seconds=instrumented_seconds, timing_is_instrumented=True,
-            artifact_sha256={name:digest(directory/name) for name in artifacts}))
+            artifact_sha256={name:digest(directory/name) for name in artifacts})
+        if args.cache_reference_run:
+            reference=json.loads((args.cache_reference_run/'samples'/f'{index:05d}'/'baseline.json').read_text())
+            verify_cache_reference(result,reference)
+            result['clean_cache_baseline_verified']=True
+        write_json(result_path,result)
         from .report import analyze
         analyze(args.out)
         completed_this_run += 1
