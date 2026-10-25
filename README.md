@@ -1,5 +1,9 @@
 # DIFFA-2: MMAU-Pro drift with official FPD
 
+The separate [cache benchmark](CACHING.md) provides six acoustic/text/semantic
+refresh schedules, delayed start from the completed drift cohort's mean forward
+count, and configurable layer ranges for later deep-layer experiments.
+
 Fresh 50-example observation study of **semantic audio, acoustic audio, and fixed
 input text**. Uses the pinned official DIFFA-2 factor-based parallel decoder
 directly. **128 maximum answer tokens**, 32-token blocks, factor=1.0, temperature=0.
