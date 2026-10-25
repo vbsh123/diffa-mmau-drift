@@ -20,6 +20,19 @@ runs after 1024 forwards instead of forcing tokens or silently modifying decodin
 
 ## Vast: one setup-and-run command
 
+The repository is private. On a fresh Vast instance, authenticate GitHub once
+before cloning (the `gh auth login` command prints a device code and login URL):
+
+```bash
+apt-get update
+apt-get install -y gh
+gh auth login --hostname github.com --git-protocol https --web
+gh auth setup-git
+```
+
+Skip those commands if GitHub authentication is already configured. If the
+repository is later made public, authentication is unnecessary.
+
 Use a **single A40 48GB** (or another BF16 CUDA GPU with enough VRAM), Python
 3.10–3.12, a CUDA 12.4-compatible driver, and approximately **100GB free disk**
 for the Python environment, model cache, and temporary activations. Full model
