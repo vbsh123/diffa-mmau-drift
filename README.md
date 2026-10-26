@@ -204,3 +204,31 @@ GPU validation runs separately on Vast.
 - [MMAU-Pro dataset](https://huggingface.co/datasets/gamma-lab-umd/MMAU-Pro).
 
 Audio, checkpoints, local caches and outputs remain excluded from Git.
+
+
+## Answer hidden-state drift
+
+New drift runs also record post-block hidden-state drift for the generated answer.
+This is separate from attention and from the unchanged fixed-prefix drift file.
+`answer_drift.jsonl` compares the final visible answer span (including reasoning,
+excluding first EOS and later canvas positions) against previous/initial forwards.
+Stable MASK and stable decoded controls require identical input IDs in the two
+compared forwards. Changed-ID positions and all content positions are reported
+separately; their change includes token replacement. Empty groups are omitted.
+The final span is retrospective and cannot serve as an online cache rule.
+
+The recorder observes the native decoder without changing its decisions. Clean
+cache timing still has no observation hooks. `--no-answer-drift` disables these
+additional diagnostics. Final reports include the offline interactive
+`analysis/answer_drift_by_forward.html` with per-forward/five-forward views,
+layer controls, token counts and CSV export. No Plotly installation is required.
+Rebuild that HTML for a completed or partial run without loading a model with
+`python -m drift_study.answer_report runs/mmau50_long_answer_drift`.
+
+Earlier MMAU downloads did not save answer hidden states, so their answer drift
+cannot be recovered offline. To measure it, use a **new checkout/output folder**
+with the same existing manifest, e.g. `RUN_NAME=runs/mmau50_long_answer_drift`
+with `scripts/run.sh`. Do not update source inside an active/resumable run.
+The older GSM drift files already include stable masked/decoded/changed answer
+positions, but use the full512-slot canvas and a different decoder; comparisons
+with new MMAU visible-span curves are descriptive.

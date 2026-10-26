@@ -172,6 +172,8 @@ def analyze(out, plots=False):
         plot(samples, destination)
         from .attention_report import analyze as attention_analyze
         attention_analyze(out,plots=True)
+        from .answer_report import build as build_answer_html
+        build_answer_html(out)
     (destination/'report.md').write_text('\n'.join(lines))
     return summary
 
