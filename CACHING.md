@@ -84,3 +84,42 @@ so these are autonomous generation timings rather than equal-work replay.
 CPU tests compare physical skipping against an independent dense stale-K/V/output
 reference for all six layerwise schedules, delayed starts and BF16. Native FPD
 identity output/NFE is checked. Full-checkpoint GPU quality/speed need the Vast run.
+
+## Missing unhalved forward10 controls
+
+`scripts/controls.sh` runs only the six **flat** schedules, plus a fresh clean
+baseline, on each existing cohort (700 timed generations total). Every layer uses
+the same base triplet: no deep semantic halving. Start10, all32 layers, official
+FPD, reasoning prompt,128 answer slots, scoring and cache engine are unchanged.
+It runs neither drift nor attention. The engine already supports factor1; this
+launcher does not change its implementation.
+
+Use a new checkout and reuse the existing frozen manifests/audio rather than
+selecting a new long cohort:
+
+```bash
+cd /workspace
+git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-controls
+cd diffa-mmau-controls
+nohup env SKIP_INSTALL=1 \
+  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
+  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
+  ORIGINAL_MANIFEST=/workspace/diffa-mmau-drift/data/mmau50.json \
+  LONG_MANIFEST=/workspace/diffa-mmau-next/data/mmau50_long.json \
+  bash scripts/controls.sh > controls.log 2>&1 &
+tail -f controls.log
+```
+
+Start after the active measurement job finishes, to keep one GPU job at a time.
+Both existing manifests and their WAVs are checked before inference. Missing or
+changed cohorts fail instead of resampling. Stale shell settings cannot override
+the prescribed50 questions, all layers, forward10 or factor1. The standalone
+scripts remain configurable for other experiments.
+
+Outputs: `runs/cache50_original_forward10_all_flat`,
+`runs/cache50_long_forward10_all_flat`, and the combined
+`runs/forward10_unhalved_controls.tar.gz`. Compare each flat policy against its
+previous `_deepsem2` counterpart on the same cohort. Compare paired latency
+speedups against each run's own clean baseline; do not compare raw TPS alone
+across different GPU sessions. The previous mean-start57 run is not the matched
+control for deep semantic refresh.

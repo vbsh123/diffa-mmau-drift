@@ -195,27 +195,29 @@ class CacheEngineTests(unittest.TestCase):
 
     @torch.no_grad()
     def test_layer_specific_semantic_refresh_and_forward10_against_dense_reference(self):
-        for base in POLICIES.values():
-            tested=deepcopy(self.llm).float()
-            reference=deepcopy(self.llm).float()
-            schedule=layer_schedule(base,[0,1],[1],2)
-            clock=self.install_dense_reference(reference,base,[0,1],10,schedule)
-            with PrefixCache(tested,self.prepared,base,[0,1],10,schedule) as cache:
-                for step in range(45):
-                    clock[0]=step
-                    torch.manual_seed(900+step)
-                    inputs=torch.randn(1,self.prepared.prefix_length+4,16)
-                    torch.testing.assert_close(tested(inputs_embeds=inputs).logits,
-                        reference(inputs_embeds=inputs).logits,atol=3e-6,rtol=3e-6)
-            account=cache.accounting()
-            self.assertEqual(account['actual_reuse_forwards'],35-35//max(base))
-            for layer in (0,1):
-                for index,group in enumerate(('acoustic','text','semantic')):
-                    interval=schedule[layer][index]
-                    expected=sum(step<=9 or (step-9)%interval==0 for step in range(45))
-                    self.assertEqual(account['refresh_counts_by_layer'][str(layer)][group],expected)
-            self.assertGreater(account['refresh_counts_by_layer']['1']['semantic'],
-                               account['refresh_counts_by_layer']['0']['semantic'])
+        for factor in (1,2):
+            for base in POLICIES.values():
+                tested=deepcopy(self.llm).float()
+                reference=deepcopy(self.llm).float()
+                schedule=layer_schedule(base,[0,1],[1],factor)
+                clock=self.install_dense_reference(reference,base,[0,1],10,schedule)
+                with PrefixCache(tested,self.prepared,base,[0,1],10,schedule) as cache:
+                    for step in range(45):
+                        clock[0]=step
+                        torch.manual_seed(900+step)
+                        inputs=torch.randn(1,self.prepared.prefix_length+4,16)
+                        torch.testing.assert_close(tested(inputs_embeds=inputs).logits,
+                            reference(inputs_embeds=inputs).logits,atol=3e-6,rtol=3e-6)
+                account=cache.accounting()
+                self.assertEqual(account['actual_reuse_forwards'],35-35//max(base))
+                for layer in (0,1):
+                    for index,group in enumerate(('acoustic','text','semantic')):
+                        interval=schedule[layer][index]
+                        expected=sum(step<=9 or (step-9)%interval==0 for step in range(45))
+                        self.assertEqual(account['refresh_counts_by_layer'][str(layer)][group],expected)
+                comparison=self.assertGreater if factor==2 else self.assertEqual
+                comparison(account['refresh_counts_by_layer']['1']['semantic'],
+                           account['refresh_counts_by_layer']['0']['semantic'])
 
 
 class CacheReportTests(unittest.TestCase):

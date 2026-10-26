@@ -81,6 +81,52 @@ with open('jobs.jsonl','a') as stream: stream.write(json.dumps(row)+'\\n')
             with tarfile.open(root/'runs'/'next_results.tar.gz') as archive:
                 self.assertEqual(set(archive.getnames()),{j['RUN_NAME'].split('/')[-1] for j in jobs})
 
+    def test_unhalved_launcher_uses_existing_cohorts_and_only_two_cache_jobs(self):
+        repository=Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);scripts=root/'scripts';scripts.mkdir()
+            (scripts/'controls.sh').write_bytes((repository/'scripts'/'controls.sh').read_bytes())
+            (scripts/'setup.sh').write_text(
+                'study_venv='+shlex.quote(str(Path(sys.executable).parent.parent))+'\n'
+                'study_diffa=/unused/official\n'
+                'export PATH='+shlex.quote(str(Path(sys.executable).parent))+':"$PATH"\n')
+            stub="""import json,os
+from pathlib import Path
+row={key:os.environ.get(key) for key in ('MANIFEST','RUN_NAME','SAMPLES','CACHE_START',
+    'CACHE_START_FORWARD','DEEP_SEMANTIC_FACTOR','CACHE_LAYERS','MATCHED_FLAT',
+    'ALLOW_LEGACY_SHORT_COHORT','MAX_SECONDS','BASELINE_RUN','VERIFY_SAMPLES')}
+Path(row['RUN_NAME']).mkdir(parents=True)
+with open('jobs.jsonl','a') as stream:stream.write(json.dumps(row)+'\\n')
+"""
+            (scripts/'cache.sh').write_text(shlex.quote(sys.executable)+" - <<'PY'\n"+stub+'PY\n')
+            audio=root/'clip.wav';audio.write_bytes(b'frozen-payload')
+            rows=[dict(id=str(i),audio='clip.wav',audio_sha256=digest(audio),
+                question='Q?',choices=['yes','no'],prompt=prompt_for('Q?',['yes','no'])) for i in range(50)]
+            original=root/'original.json';long=root/'long.json'
+            write_json(original,dict(settings=dict(samples=50),rows=rows))
+            from drift_study.audio_windows import INPUT_PROTOCOL
+            write_json(long,dict(settings=dict(samples=50,input_protocol=INPUT_PROTOCOL,min_seconds=60,max_seconds=None),rows=rows))
+            before=[digest(p) for p in (original,long)]
+            env=dict(os.environ,ORIGINAL_MANIFEST=str(original),LONG_MANIFEST=str(long),
+                PYTHONPATH=str(repository),SAMPLES='3',CACHE_START='mean',CACHE_START_FORWARD='57',
+                DEEP_SEMANTIC_FACTOR='2',MAX_SECONDS='30',MATCHED_FLAT='1',CACHE_LAYERS='0',
+                BASELINE_RUN='/bad/reference',VERIFY_SAMPLES='0')
+            for key in ('ORIGINAL_CACHE_RUN_NAME','LONG_CACHE_RUN_NAME','RESULTS_ARCHIVE'):
+                env.pop(key,None)
+            done=subprocess.run(['bash','scripts/controls.sh'],cwd=root,env=env,capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            jobs=[json.loads(line) for line in (root/'jobs.jsonl').read_text().splitlines()]
+            self.assertEqual(len(jobs),2)
+            self.assertEqual([j['MANIFEST'] for j in jobs],[str(original),str(long)])
+            self.assertEqual([digest(p) for p in (original,long)],before)
+            self.assertEqual([j['ALLOW_LEGACY_SHORT_COHORT'] for j in jobs],['1','0'])
+            for job in jobs:
+                for key,value in dict(SAMPLES='50',CACHE_START='fixed',CACHE_START_FORWARD='10',
+                    DEEP_SEMANTIC_FACTOR='1',CACHE_LAYERS='all',MATCHED_FLAT='0',VERIFY_SAMPLES='2').items():
+                    self.assertEqual(job[key],value)
+                self.assertIsNone(job['MAX_SECONDS']);self.assertIsNone(job['BASELINE_RUN'])
+            self.assertTrue((root/'runs'/'forward10_unhalved_controls.tar.gz').is_file())
+
 
 if __name__=='__main__':
     unittest.main()
