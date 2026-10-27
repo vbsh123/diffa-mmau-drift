@@ -11,3 +11,4 @@ soundfile==0.13.1
 librosa==0.11.0
 loguru==0.7.3
 matplotlib==3.10.1
+scipy==1.15.3

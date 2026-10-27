@@ -79,7 +79,7 @@ def parser():
     p.add_argument('--deep-semantic-layers',default='24-31')
     p.add_argument('--allow-legacy-short-cohort',action='store_true',help='Explicitly reuse an existing frozen short-audio manifest; does not select new short clips')
     p.add_argument('--matched-flat',action='store_true',help='Also run the six unmodified flat controls')
-    p.add_argument('--samples',type=int,default=50,help='First N of the frozen50; mean modes require all50 original baseline results')
+    p.add_argument('--samples',type=int,default=50,help='First N of the frozen cohort; matched study uses200 per arm')
     p.add_argument('--verify-samples',type=int,default=2)
     p.add_argument('--preflight-only',action='store_true',help='Validate full calibration without loading models')
     return p
@@ -87,13 +87,13 @@ def parser():
 
 def main():
     args = parser().parse_args()
-    if not 1 <= args.samples <= 50 or not 0 <= args.verify_samples <= args.samples:
+    if args.samples<1 or not 0 <= args.verify_samples <= args.samples:
         raise ValueError('Invalid samples/verification count')
     if len(set(args.policies)) != len(args.policies):
         raise ValueError('Duplicate cache policy')
     manifest = read_manifest(args.manifest)
-    if len(manifest['rows'])!=50 or (manifest['settings'].get('input_protocol')!=INPUT_PROTOCOL and not args.allow_legacy_short_cohort):
-        raise ValueError('Prepare the complete new 50-example long-audio cohort before benchmarking')
+    if args.samples>len(manifest['rows']) or (manifest['settings'].get('input_protocol')!=INPUT_PROTOCOL and not args.allow_legacy_short_cohort):
+        raise ValueError('Requested samples exceed the frozen cohort, or input protocol is unsupported')
     if args.baseline_run:
         old_manifest=args.baseline_manifest or args.baseline_run.resolve().parents[1]/'data'/'mmau50_long.json'
         calibration=calibrate(args.baseline_run,old_manifest,manifest,args.start,args.start_forward)

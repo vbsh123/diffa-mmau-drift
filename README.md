@@ -1,5 +1,10 @@
 # DIFFA-2 long-audio drift with official FPD
 
+The new [fresh200-question matched study](STUDY200.md) runs both short and long
+MMAU with all six schedules flat and halved on the same questions, followed by
+paired confidence statistics. Start it with `scripts/study200.sh`.
+
+
 The default study now selects **50 complete MMAU-Pro clips longer than 60 seconds**.
 There is **no fixed maximum clip duration**, no `short` metadata filter, and no
 24MiB payload cutoff. Entire clips must fit the pinned backbone's actual context

@@ -1,5 +1,6 @@
 """Seeded, duration-verified MMAU-Pro sampling without whole-archive download."""
 import argparse
+import hashlib
 from collections import Counter
 import io
 import json
@@ -37,6 +38,8 @@ def read_manifest(path):
     rows = document['rows']
     if len(rows) != document['settings']['samples'] or len({r['id'] for r in rows}) != len(rows):
         raise ValueError('Manifest count or IDs invalid')
+    if document['settings'].get('unique_audio') and len({r['audio_sha256'] for r in rows})!=len(rows):
+        raise ValueError('Unique-audio manifest contains duplicate WAV hashes')
     for row in rows:
         audio = path.parent/row['audio']
         if not audio.is_file() or digest(audio) != row['audio_sha256']:
@@ -63,19 +66,30 @@ def prompt_token_count(tokenizer,instruction):
     return len(tokenizer(text)['input_ids'])
 
 
-def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,min_seconds=60.):
+def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,min_seconds=60.,
+            unique_audio=False,exclude_manifests=()):
     from huggingface_hub import HfApi, hf_hub_download, hf_hub_url
     import pyarrow.parquet as pq
     import soundfile as sf
     out = Path(out).resolve()
     settings = dict(samples=samples,seed=seed,max_seconds=max_seconds,min_seconds=min_seconds,
                     input_protocol=INPUT_PROTOCOL)
+    exclusions=[read_manifest(path) for path in exclude_manifests]
+    excluded_ids={r['id'] for document in exclusions for r in document['rows']}
+    excluded_hashes={r['audio_sha256'] for document in exclusions for r in document['rows']}
+    excluded_members={r['source_audio'] for document in exclusions for r in document['rows'] if r.get('source_audio')}
+    if unique_audio:
+        settings['unique_audio']=True
+    if exclude_manifests:
+        settings['exclude_manifest_sha256']=sorted(digest(path) for path in exclude_manifests)
+    if any(document['dataset']!=DATASET or document['revision']!=revision for document in exclusions):
+        raise ValueError('Exclusion manifests must use the same pinned MMAU-Pro revision')
     if (samples<3 or not math.isfinite(min_seconds) or min_seconds<0
             or (max_seconds is not None and (not math.isfinite(max_seconds) or max_seconds<=min_seconds))):
         raise ValueError('Need >=3 examples and valid optional duration bounds; no default maximum')
     if out.exists():
         existing = read_manifest(out)
-        if existing['settings'] != settings or revision not in ('main', existing['revision']):
+        if existing['dataset']!=DATASET or existing['settings'] != settings or revision not in ('main', existing['revision']):
             raise ValueError('Preparation settings changed; use a new manifest')
         return existing
     pinned = HfApi().dataset_info(DATASET, revision=revision).sha
@@ -92,11 +106,19 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
     audio_dir.mkdir(exist_ok=True)
     rejected, accepted = Counter(), {domain: [] for domain in DOMAINS}
     remote = HTTPRangeFile(hf_hub_url(DATASET, 'data.zip', repo_type='dataset', revision=pinned))
+    seen_audio=set()
+    seen_members=set()
     with remote, zipfile.ZipFile(remote) as archive:
         names = set(archive.namelist())
         for domain, needed in quotas(samples).items():
             for candidate in pools[domain]:
                 member = candidate['audio_path'][0]
+                if candidate['id'] in excluded_ids or member in excluded_members:
+                    rejected[domain+'_previous_question_or_audio']+=1
+                    continue
+                if unique_audio and member in seen_members:
+                    rejected[domain+'_duplicate_audio_member']+=1
+                    continue
                 if PurePosixPath(member).is_absolute() or '..' in PurePosixPath(member).parts:
                     raise ValueError('Unsafe archive path')
                 # The published metadata uses data/..., while archive roots can differ.
@@ -132,6 +154,15 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
                 actual=sf.info(io.BytesIO(payload))
                 if (actual.frames,actual.samplerate,actual.channels)!=(description.frames,description.samplerate,description.channels):
                     raise ValueError('Full audio header differs from streamed header; refusing truncated or inconsistent audio')
+                audio_hash=hashlib.sha256(payload).hexdigest()
+                if audio_hash in excluded_hashes:
+                    rejected[domain+'_previous_audio_hash']+=1
+                    continue
+                if unique_audio and audio_hash in seen_audio:
+                    rejected[domain+'_duplicate_audio_hash']+=1
+                    continue
+                seen_audio.add(audio_hash)
+                seen_members.add(member)
                 target = chr(65+candidate['choices'].index(candidate['answer']))
                 destination = audio_dir/(candidate['id']+'.wav')
                 destination.write_bytes(payload)
@@ -154,6 +185,7 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
                     quotas=quotas(samples), exclusions=dict(rejected), archive_bytes_read=remote.bytes_received,
                     metadata_rows=len(rows), metadata_eligible_rows=sum(map(len, pools.values())), rows=selected)
     document['context_limit']=context_limit
+    document['unique_audio_files']=len({r['audio_sha256'] for r in selected})
     write_json(out, document)
     return document
 
@@ -180,8 +212,11 @@ def main():
     p.add_argument('--revision', default=DATASET_REVISION)
     p.add_argument('--min-seconds',type=float,default=60.)
     p.add_argument('--max-seconds',type=float,default=None)
+    p.add_argument('--unique-audio',action='store_true')
+    p.add_argument('--exclude-manifest',type=Path,action='append',default=[])
     args = p.parse_args()
-    prepare(args.out,args.samples,args.seed,args.revision,args.max_seconds,args.min_seconds)
+    prepare(args.out,args.samples,args.seed,args.revision,args.max_seconds,args.min_seconds,
+            args.unique_audio,args.exclude_manifest)
 
 
 if __name__ == '__main__':
