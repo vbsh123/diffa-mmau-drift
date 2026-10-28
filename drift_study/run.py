@@ -145,7 +145,8 @@ def main():
         if directory.exists():
             shutil.rmtree(directory)  # Only incomplete outputs owned by this matching run.
         directory.mkdir(parents=True)
-        audio = load_audio(args.manifest.resolve().parent/row['audio'])
+        audio = load_audio(args.manifest.resolve().parent/row['audio'],
+            allow_stereo=manifest['settings'].get('audio_channel_policy')=='mono-or-stereo-mean-to-mono-v1')
         prepared = prepare(model, tokenizer, extractor, audio, row['prompt'], ANSWER_TOKENS)
         expected = row['estimated_audio_tokens']
         actual = prepared.groups()

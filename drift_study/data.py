@@ -67,13 +67,15 @@ def prompt_token_count(tokenizer,instruction):
 
 
 def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,min_seconds=60.,
-            unique_audio=False,exclude_manifests=()):
+            unique_audio=False,exclude_manifests=(),allow_stereo=False):
     from huggingface_hub import HfApi, hf_hub_download, hf_hub_url
     import pyarrow.parquet as pq
     import soundfile as sf
     out = Path(out).resolve()
     settings = dict(samples=samples,seed=seed,max_seconds=max_seconds,min_seconds=min_seconds,
                     input_protocol=INPUT_PROTOCOL)
+    if allow_stereo:
+        settings['audio_channel_policy']='mono-or-stereo-mean-to-mono-v1'
     exclusions=[read_manifest(path) for path in exclude_manifests]
     excluded_ids={r['id'] for document in exclusions for r in document['rows']}
     excluded_hashes={r['audio_sha256'] for document in exclusions for r in document['rows']}
@@ -140,7 +142,7 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
                 if duration<=min_seconds or (max_seconds is not None and duration>max_seconds):
                     rejected[domain+'_duration'] += 1
                     continue
-                if not description.frames or description.channels != 1:
+                if not description.frames or description.channels not in ((1,2) if allow_stereo else (1,)):
                     rejected[domain+'_empty_or_stereo'] += 1
                     continue
                 instruction=prompt_for(candidate['question'],candidate['choices'])
@@ -178,7 +180,11 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
                 if len(accepted[domain]) == needed:
                     break
             if len(accepted[domain]) != needed:
-                raise ValueError(f'Only {len(accepted[domain])}/{needed} eligible {domain} examples; no fallback sampling')
+                diagnostics=dict(domain=domain,needed=needed,accepted=len(accepted[domain]),
+                    settings=settings,rejected=dict(rejected))
+                write_json(out.with_suffix('.sampling_failure.json'),diagnostics)
+                raise ValueError(f'Only {len(accepted[domain])}/{needed} eligible {domain} examples; '
+                    f'rejections: {dict(rejected)}; details: {out.with_suffix(".sampling_failure.json")}; no fallback sampling')
     # Interleave domains: the first three are predetermined matrix exemplars.
     selected = [accepted[d][i] for i in range(max(map(len, accepted.values()))) for d in DOMAINS if i<len(accepted[d])]
     document = dict(dataset=DATASET, revision=pinned, metadata_sha256=digest(metadata), settings=settings,
@@ -190,15 +196,17 @@ def prepare(out,samples=50,seed=SEED,revision=DATASET_REVISION,max_seconds=None,
     return document
 
 
-def load_audio(path):
+def load_audio(path,allow_stereo=False):
     import numpy as np
     import soundfile as sf
     import torch
     import torchaudio
     audio, rate = sf.read(path, dtype='float32', always_2d=True)
-    if audio.shape[1] != 1 or not audio.size or not np.isfinite(audio).all():
-        raise ValueError('Need complete finite mono audio')
-    wave = torch.from_numpy(audio[:, 0].copy())
+    if audio.shape[1] not in ((1,2) if allow_stereo else (1,)) or not audio.size or not np.isfinite(audio).all():
+        raise ValueError('Need complete finite mono audio (or explicitly enabled stereo)')
+    # Preserve mono samples exactly; stereo uses the standard arithmetic mean.
+    mono=audio[:,0] if audio.shape[1]==1 else audio.mean(axis=1)
+    wave = torch.from_numpy(mono.copy())
     if rate != 16000:
         wave = torchaudio.functional.resample(wave, rate, 16000)
     return wave.numpy()
@@ -213,10 +221,11 @@ def main():
     p.add_argument('--min-seconds',type=float,default=60.)
     p.add_argument('--max-seconds',type=float,default=None)
     p.add_argument('--unique-audio',action='store_true')
+    p.add_argument('--allow-stereo',action='store_true',help='Keep complete stereo clips and average channels before resampling')
     p.add_argument('--exclude-manifest',type=Path,action='append',default=[])
     args = p.parse_args()
     prepare(args.out,args.samples,args.seed,args.revision,args.max_seconds,args.min_seconds,
-            args.unique_audio,args.exclude_manifest)
+            args.unique_audio,args.exclude_manifest,args.allow_stereo)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-# Fresh200-question matched confirmation study
+# 200-question matched caching study
 
 Two frozen cohorts,200 questions each. All13 conditions run on exactly the same
 questions within each cohort: one fresh dense baseline, six flat refresh schedules,
@@ -28,8 +28,13 @@ probes or scoring/file I/O enter those timers. Warmups and identity checks are e
   never crop to fit. Encoder windows cover every input sample.
 - Seed20261027, quotas67 speech/67 sound/66 music in each arm. No selection by
   model correctness or generated answer quality.
-- Exclude all old question IDs, source audio members and WAV hashes from both
-  prior50-question development manifests.
+- Old development manifests are optional. If supplied, exclude their question IDs,
+  source audio members and WAV hashes. Without them, previous-cohort overlap is
+  **unchecked**; do not describe the new cohorts as confirmed fresh holdouts.
+- Mono and stereo WAVs are eligible. Stereo is averaged across its two channels
+  before resampling, preserving every time sample. Mono samples are unchanged.
+  This channel policy is recorded in each manifest and the frozen plan. The old
+  mono-only rule excluded421 of446 long sound candidates.
 - One selected question per unique audio hash. Both200-question manifests are
   frozen and checked before GPU inference. If enough unique eligible audio is not
   available for the quotas, preparation stops with diagnostics; it never silently
@@ -40,27 +45,31 @@ probes or scoring/file I/O enter those timers. Warmups and identity checks are e
 
 ## Vast command
 
-Use a new checkout and keep the old manifests plus their WAVs available for
-exclusion checks. Start after the current GPU measurement job finishes.
+On a new Vast machine, no old manifests or WAV files are required. The default
+command installs dependencies and downloads the pinned source and datasets:
 
 ```bash
 cd /workspace
+# If this checkout already exists, enter it and run git pull --ff-only instead.
 git clone https://github.com/vbsh123/diffa-mmau-drift.git diffa-mmau-200
 cd diffa-mmau-200
-nohup env SKIP_INSTALL=1 \
-  AUDIO_VENV=/workspace/diffa-mmau-drift/.venv \
-  DIFFA_ROOT=/workspace/diffa-mmau-drift/external/DIFFA \
-  ORIGINAL_MANIFEST=/workspace/diffa-mmau-drift/data/mmau50.json \
-  LONG_MANIFEST=/workspace/diffa-mmau-next/data/mmau50_long.json \
-  bash scripts/study200.sh > study200.log 2>&1 &
+nohup bash scripts/study200.sh > study200.log 2>&1 &
 tail -f study200.log
 ```
 
-On a fresh machine omit `SKIP_INSTALL` and `AUDIO_VENV` to install dependencies.
-Adjust original manifest paths if the earlier checkout lives elsewhere. No old
-inference source or results are modified. Source/config changes require a fresh
-output root; completed conditions otherwise resume without repeating their timers.
-Cohort preparation may take time and completes for both arms before model loading.
+If the existing installation in this checkout already works, use
+`nohup env SKIP_INSTALL=1 bash scripts/study200.sh > study200.log 2>&1 &`.
+`SKIP_INSTALL=1` skips package installation; it does not set up missing dependencies.
+`AUDIO_VENV` can point to an existing working environment elsewhere.
+Unset stale `ORIGINAL_MANIFEST` and `LONG_MANIFEST` variables on a fresh machine.
+Only supply those variables if the corresponding old manifests **and their WAVs**
+exist and you want verified old-cohort exclusions.
+
+The revised launcher writes new `mmau200_short_stereo_v2.json` and
+`mmau200_long_stereo_v2.json` manifests, avoiding the previous mono-only manifests.
+Both cohorts finish preparation before model loading. Insufficient sampling writes
+`*.sampling_failure.json` with all rejection counts. Completed GPU outputs remain
+immutable; source/config changes require separate output directories.
 The intended run has **5200 timed generations**, not200 total generations.
 
 Outputs:

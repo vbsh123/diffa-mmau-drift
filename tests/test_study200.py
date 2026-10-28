@@ -35,7 +35,8 @@ class FreshCohortTests(unittest.TestCase):
                         # k0/k1 are old audio; k2/k3 are another duplicated WAV.
                         family=0 if k<2 else 2 if k<4 else k
                         value=(di*10+family+1)/100
-                        wave=io.BytesIO();sf.write(wave,np.full(1600,value,dtype=np.float32),16000,format='WAV')
+                        shape=1600 if k<2 else (1600,2)
+                        wave=io.BytesIO();sf.write(wave,np.full(shape,value,dtype=np.float32),16000,format='WAV')
                         payload=wave.getvalue();member=f'data/{domain}{k}.wav';z.writestr(member,payload)
                         metadata.append(dict(id=f'{domain}{k}',category=domain,audio_path=[member],
                             question='Q?',choices=['yes','no'],answer='yes'))
@@ -52,17 +53,39 @@ class FreshCohortTests(unittest.TestCase):
                  patch('drift_study.data.context_spec',return_value=(lambda text:{'input_ids':[1]*20},4096)):
                 api.return_value.dataset_info.return_value.sha='pinned'
                 result=prepare(root/'fresh.json',samples=6,revision='pinned',min_seconds=0,
-                    max_seconds=30,unique_audio=True,exclude_manifests=[old_manifest])
+                    max_seconds=30,unique_audio=True,exclude_manifests=[old_manifest],allow_stereo=True)
                 same=prepare(root/'fresh.json',samples=6,revision='pinned',min_seconds=0,
-                    max_seconds=30,unique_audio=True,exclude_manifests=[old_manifest])
+                    max_seconds=30,unique_audio=True,exclude_manifests=[old_manifest],allow_stereo=True)
+                with self.assertRaisesRegex(ValueError,'rejections:'):
+                    prepare(root/'mono_only.json',samples=6,revision='pinned',min_seconds=0,
+                        max_seconds=30,unique_audio=True,exclude_manifests=[old_manifest])
+                diagnostic=json.loads((root/'mono_only.sampling_failure.json').read_text())
+                self.assertEqual(diagnostic['accepted'],0)
+                self.assertGreater(diagnostic['rejected']['speech_empty_or_stereo'],0)
             self.assertEqual(result,same)
             self.assertEqual(len({r['audio_sha256'] for r in result['rows']}),6)
             self.assertFalse({r['id'] for r in result['rows']}&{r['id'] for r in old})
             self.assertFalse({r['audio_sha256'] for r in result['rows']}&{r['audio_sha256'] for r in old})
             self.assertEqual(result['quotas'],dict(speech=2,sound=2,music=2))
+            self.assertTrue(all(r['channels']==2 for r in result['rows']))
+            self.assertEqual(result['settings']['audio_channel_policy'],'mono-or-stereo-mean-to-mono-v1')
             broken=deepcopy(result);broken['rows'][1]['audio_sha256']=broken['rows'][0]['audio_sha256']
             write_json(root/'broken.json',broken)
             with self.assertRaisesRegex(ValueError,'duplicate WAV'):read_manifest(root/'broken.json')
+
+    def test_stereo_downmix_preserves_full_duration_and_mono_is_unchanged(self):
+        from drift_study.data import load_audio
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'stereo.wav'
+            samples=np.column_stack((np.linspace(-.8,.6,16000,dtype=np.float32),
+                np.linspace(.4,.8,16000,dtype=np.float32)))
+            sf.write(path,samples,16000,subtype='FLOAT')
+            with self.assertRaisesRegex(ValueError,'explicitly enabled stereo'):load_audio(path)
+            result=load_audio(path,allow_stereo=True)
+            np.testing.assert_array_equal(result,samples.mean(axis=1))
+            self.assertEqual(len(result),16000)
+            sf.write(path,samples[:,0],16000,subtype='FLOAT')
+            np.testing.assert_array_equal(load_audio(path),load_audio(path,allow_stereo=True))
 
     def test_200_preflight_accepts_matched_profiles_without_loading_gpu_or_models(self):
         from cache_study.run import main
@@ -94,7 +117,7 @@ if args[:2]==['-m','drift_study.data']:
         audio=path.parent/(path.stem+str(i)+'.wav');audio.write_bytes((path.stem+str(i)).encode())
         rows.append(dict(id=path.stem+str(i),audio=audio.name,audio_sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
             audio_seconds=20 if short else120,question='Q?',choices=['yes','no'],prompt=prompt_for('Q?',['yes','no'])))
-    path.write_text(json.dumps(dict(dataset='test',revision='pinned',settings=dict(samples=200,unique_audio=True,max_seconds=30 if short else None),rows=rows)))
+    path.write_text(json.dumps(dict(dataset='test',revision='pinned',settings=dict(samples=200,unique_audio=True,max_seconds=30 if short else None,audio_channel_policy='mono-or-stereo-mean-to-mono-v1'),rows=rows)))
     with open('calls.jsonl','a') as f:f.write(json.dumps(dict(kind='prepare',args=args))+'\\n')
 elif args[:2]==['-m','cache_study.run']:
     with open('calls.jsonl','a') as f:f.write(json.dumps(dict(kind='preflight' if '--preflight-only' in args else 'decode',args=args))+'\\n')
@@ -128,6 +151,7 @@ else:
                 args=call['args']
                 if call['kind'] in ['prepare','preflight','decode']:
                     self.assertEqual(args[args.index('--samples')+1],'200')
+                if call['kind']=='prepare':self.assertIn('--allow-stereo',args)
                 if call['kind'] in ['preflight','decode']:
                     self.assertIn('--matched-flat',args)
                     self.assertEqual(args[args.index('--start-forward')+1],'10')
@@ -136,6 +160,13 @@ else:
             plan=json.loads((root/'runs'/'mmau200_experimental_plan.json').read_text())
             self.assertEqual(plan['timed_generations'],5200);self.assertEqual(plan['conditions_per_question'],13)
             self.assertTrue((root/'runs'/'mmau200_matched_results.tar.gz').is_file())
+            # A fresh Vast machine needs neither old manifest nor old WAV files.
+            env.pop('ORIGINAL_MANIFEST');env.pop('LONG_MANIFEST')
+            done=subprocess.run(['bash','scripts/study200.sh'],cwd=root,env=env,capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()][7:]
+            self.assertFalse(any('--exclude-manifest' in c['args'] for c in calls))
+            self.assertIn('previous-cohort overlap is unchecked',done.stdout)
 
 
 class MatchedStatisticsTests(unittest.TestCase):

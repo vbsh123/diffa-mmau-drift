@@ -185,7 +185,8 @@ def main():
         if not missing and not needs_verification:
             print(f'Skip complete {index+1}/{len(rows)}',flush=True)
             continue
-        audio = load_audio(args.manifest.resolve().parent/row['audio'])
+        audio = load_audio(args.manifest.resolve().parent/row['audio'],
+            allow_stereo=manifest['settings'].get('audio_channel_policy')=='mono-or-stereo-mean-to-mono-v1')
         prepared = prepare(model,tokenizer,extractor,audio,row['prompt'],ANSWER_TOKENS)
         if not warmed:
             print('Process warmup: dense and each cache policy once; cache warmups use immediate reuse',flush=True)

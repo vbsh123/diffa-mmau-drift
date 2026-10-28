@@ -1,57 +1,53 @@
 #!/usr/bin/env bash
-# Fresh200+200, both refresh profiles matched within each question; one GPU job.
+# 200+200, both refresh profiles matched within each question; one GPU job.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 unset MAX_SECONDS MIN_SECONDS SAMPLES BASELINE_RUN BASELINE_MANIFEST CACHE_REFERENCE_RUN
 source scripts/setup.sh
-original50="${ORIGINAL_MANIFEST:-/workspace/diffa-mmau-drift/data/mmau50.json}"
-long50="${LONG_MANIFEST:-/workspace/diffa-mmau-next/data/mmau50_long.json}"
-short200="${SHORT200_MANIFEST:-$PWD/data/mmau200_short_fresh.json}"
-long200="${LONG200_MANIFEST:-$PWD/data/mmau200_long_fresh.json}"
+exclusion_args=()
+for previous in "${ORIGINAL_MANIFEST:-}" "${LONG_MANIFEST:-}"; do
+  if [[ -n "$previous" ]]; then exclusion_args+=(--exclude-manifest "$previous"); fi
+done
+if [[ ${#exclusion_args[@]} == 0 ]]; then
+  echo 'No old manifests supplied: previous-cohort overlap is unchecked (new Vast machine supported).'
+fi
+short200="${SHORT200_MANIFEST:-$PWD/data/mmau200_short_stereo_v2.json}"
+long200="${LONG200_MANIFEST:-$PWD/data/mmau200_long_stereo_v2.json}"
 short_output="${SHORT200_RUN:-runs/cache200_short_forward10_paired}"
 long_output="${LONG200_RUN:-runs/cache200_long_forward10_paired}"
 statistics_output="${STATISTICS_RUN:-runs/mmau200_paired_statistics}"
-python - "$original50" "$long50" <<'PYOLD'
-import sys
-from drift_study.data import read_manifest,DATASET,DATASET_REVISION
-for path in sys.argv[1:]:
-    m=read_manifest(path)
-    if len(m['rows'])!=50 or m['dataset']!=DATASET or m['revision']!=DATASET_REVISION:
-        raise ValueError('Supply each complete original pinned50-question development manifest')
-print('Both prior50-question cohorts verified for exclusion',flush=True)
-PYOLD
 # Prepare/freeze both cohorts before starting expensive GPU inference.
 python -u -m drift_study.data --out "$short200" --samples 200 --seed 20261027 \
-  --min-seconds 0 --max-seconds 30 --unique-audio \
-  --exclude-manifest "$original50" --exclude-manifest "$long50"
+  --min-seconds 0 --max-seconds 30 --unique-audio --allow-stereo \
+  "${exclusion_args[@]}"
 python -u -m drift_study.data --out "$long200" --samples 200 --seed 20261027 \
-  --min-seconds 60 --unique-audio \
-  --exclude-manifest "$original50" --exclude-manifest "$long50"
-python - "$short200" "$long200" "$original50" "$long50" "$short_output" "$long_output" "$statistics_output" <<'PY'
+  --min-seconds 60 --unique-audio --allow-stereo \
+  "${exclusion_args[@]}"
+python - "$short200" "$long200" "$short_output" "$long_output" "$statistics_output" <<'PY'
 import sys
 from pathlib import Path
 import json
 from drift_study.data import read_manifest
 from drift_study.storage import digest,write_json
 from cache_study.protocol import POLICIES,layer_schedule
-short,long,old_short,old_long=[read_manifest(p) for p in sys.argv[1:5]]
-previous_ids={r['id'] for m in (old_short,old_long) for r in m['rows']}
-previous_audio={r['audio_sha256'] for m in (old_short,old_long) for r in m['rows']}
+short,long=[read_manifest(p) for p in sys.argv[1:3]]
 for document in (short,long):
     rows=document['rows']
+    if document['settings'].get('audio_channel_policy')!='mono-or-stereo-mean-to-mono-v1':
+        raise ValueError('Use the revised mono/stereo manifests for both cohorts')
     if len(rows)!=200 or len({r['audio_sha256'] for r in rows})!=200:
         raise ValueError('Need exactly200 fresh questions with unique audio hashes per cohort')
-    if previous_ids.intersection(r['id'] for r in rows) or previous_audio.intersection(r['audio_sha256'] for r in rows):
-        raise ValueError('Fresh cohort overlaps prior development questions/audio')
 if any(not 0<r['audio_seconds']<=30 for r in short['rows']):raise ValueError('Short cohort duration mismatch')
 if any(r['audio_seconds']<=60 for r in long['rows']) or long['settings']['max_seconds'] is not None:
     raise ValueError('Long cohort must retain complete clips over60s, without a duration cap')
 if {r['audio_sha256'] for r in short['rows']}.intersection(r['audio_sha256'] for r in long['rows']):
     raise ValueError('Short and long cohorts overlap in audio')
-outputs=[Path(p).resolve() for p in sys.argv[5:]]
+outputs=[Path(p).resolve() for p in sys.argv[3:]]
 if any(a==b or a in b.parents or b in a.parents for i,a in enumerate(outputs) for b in outputs[i+1:]):
     raise ValueError('All output folders must be separate and non-nested')
-plan=dict(questions_per_cohort=200,unique_audio_per_cohort=200,fresh=True,
+plan=dict(questions_per_cohort=200,unique_audio_per_cohort=200,
+    prior_overlap_checked={name:bool(doc['settings'].get('exclude_manifest_sha256')) for name,doc in [('short',short),('long',long)]},
+    audio_channel_policy='mono-or-stereo-mean-to-mono-v1',
     manifests={name:digest(path) for name,path in zip(('short','long'),sys.argv[1:3])},
     quotas={'speech':67,'sound':67,'music':66},start_zero_based_forward=10,cache_layers=list(range(32)),
     flat={name:layer_schedule(base,list(range(32))) for name,base in POLICIES.items()},
@@ -66,19 +62,19 @@ if path.exists():
     if json.loads(path.read_text())!=json.loads(json.dumps(plan)):
         raise ValueError('Frozen200 experimental plan changed; use a new checkout')
 else:write_json(path,plan)
-print('FROZEN:200 fresh unique-audio questions per cohort;13 conditions each;5200 timed generations',flush=True)
+print('FROZEN:200 unique-audio questions per cohort;13 conditions each;5200 timed generations; see plan for prior-overlap checks',flush=True)
 PY
 for manifest in "$short200" "$long200"; do
   python -m cache_study.run --manifest "$manifest" --samples 200 --verify-samples 2 \
     --start fixed --start-forward 10 --cache-layers all --deep-semantic-factor 2 \
     --deep-semantic-layers 24-31 --matched-flat --preflight-only
 done
-echo 'JOB 1/2: fresh short MMAU200; six flat + six halved + clean baseline'
+echo 'JOB 1/2: short MMAU200; six flat + six halved + clean baseline'
 python -u -m cache_study.run --manifest "$short200" --out "$short_output" \
   --diffa-root "$study_diffa" --samples 200 --verify-samples 2 \
   --start fixed --start-forward 10 --cache-layers all --deep-semantic-factor 2 \
   --deep-semantic-layers 24-31 --matched-flat
-echo 'JOB 2/2: fresh long MMAU200; same matched conditions'
+echo 'JOB 2/2: long MMAU200; same matched conditions'
 python -u -m cache_study.run --manifest "$long200" --out "$long_output" \
   --diffa-root "$study_diffa" --samples 200 --verify-samples 2 \
   --start fixed --start-forward 10 --cache-layers all --deep-semantic-factor 2 \
