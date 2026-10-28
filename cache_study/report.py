@@ -74,6 +74,9 @@ def analyze(out):
         'Schedule order: acoustic / fixed text / semantic. Other layers stay dense.','',
         '| Policy | N | Accuracy | Failures | TPS | Paired latency speedup | Reuse examples | Losses / recoveries |',
         '|---|---:|---:|---:|---:|---:|---:|---:|']
+    if config.get('suite')=='pyramid':
+        lines[0]='# MMAU-Pro FPD exploratory depth-pyramid cache benchmark'
+        lines[4]='Pyramid suite: explicit per-layer schedules in config.json; no global deep-semantic factor.'
     for name,row in summary.items():
         lines.append(f'| {name} | {row["n"]} | {fmt(row["accuracy"])} | {row["failures"]} | '
             f'{fmt(row["tps"])} | {fmt(row["paired_latency_speedup"])} | '

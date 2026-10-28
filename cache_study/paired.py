@@ -11,7 +11,7 @@ import scipy
 from scipy.stats import binomtest
 
 from drift_study.storage import write_json,digest
-from .protocol import POLICIES,layer_schedule
+from .protocol import POLICIES,layer_schedule,pyramid_specs,PYRAMID_CONTRASTS
 
 
 def exact_mcnemar(gains,losses):
@@ -89,7 +89,8 @@ def comparison(reference,candidate,ids,draws=20000,seed=20261027):
         failed_reference=sum(r['failed'] for r in reference.values()),failed_candidate=sum(r['failed'] for r in candidate.values()))
 
 
-def analyze(runs,out,expected_samples=200,draws=20000):
+def analyze(runs,out,expected_samples=200,draws=20000,suite='legacy'):
+    if suite not in ('legacy','pyramid'):raise ValueError('Unknown policy suite')
     all_rows=[];cohorts=[];signature=None
     for run in map(Path,runs):
         config=json.loads((run/'config.json').read_text());ids=config['sample_ids']
@@ -102,17 +103,21 @@ def analyze(runs,out,expected_samples=200,draws=20000):
         if [r['id'] for r in cohort['rows']]!=ids:
             raise ValueError('Frozen cohort IDs/order differ from run configuration')
         policies=config['policies'];conditions=['baseline']+list(policies)
-        expected={name:base for name,base in POLICIES.items()}
-        expected.update({name+'_deepsem2':base for name,base in POLICIES.items()})
+        if config.get('suite','legacy')!=suite:raise ValueError('Requested statistics suite differs from run')
+        expected_specs=pyramid_specs() if suite=='pyramid' else None
+        expected=({name:spec['base'] for name,spec in expected_specs.items()} if expected_specs else
+            {**POLICIES,**{name+'_deepsem2':base for name,base in POLICIES.items()}})
         if set(policies)!=set(expected) or any(tuple(policies[name])!=base for name,base in expected.items()):
-            raise ValueError('Need all six flat and six matched halved policies')
-        if (config['cache_layers']!=list(range(32)) or config['deep_semantic_factor']!=2
-                or config['deep_semantic_layers']!=list(range(24,32))
+            raise ValueError('Need all predefined policies for the selected suite')
+        if (config['cache_layers']!=list(range(32))
                 or config['calibration']['start_mode']!='fixed'
                 or config['calibration']['dense_warmup_forwards']!=10):
-            raise ValueError('Matched study requires all32 layers,forward10,and semantic factor2 in24–31')
+            raise ValueError('Matched study requires all32 layers and forward10')
+        if suite=='legacy' and (config['deep_semantic_factor']!=2 or config['deep_semantic_layers']!=list(range(24,32))):
+            raise ValueError('Matched halving study requires semantic factor2 in24–31')
         for name,base in expected.items():
-            schedule=layer_schedule(base,list(range(32)),list(range(24,32)) if name.endswith('_deepsem2') else (),2 if name.endswith('_deepsem2') else 1)
+            schedule=(expected_specs[name]['layer_intervals'] if expected_specs else
+                layer_schedule(base,list(range(32)),list(range(24,32)) if name.endswith('_deepsem2') else (),2 if name.endswith('_deepsem2') else 1))
             if config['layer_intervals'][name]!=json.loads(json.dumps(schedule)):
                 raise ValueError('Saved per-layer schedule differs from the matched study')
         if any(config['decoder'].get(key)!=value for key,value in
@@ -140,19 +145,20 @@ def analyze(runs,out,expected_samples=200,draws=20000):
         for name in policies:
             row=comparison(by['baseline'],by[name],ids,draws=draws)
             all_rows.append(dict(cohort=run.name,family='versus_dense',reference='baseline',candidate=name,**row))
-        flat=[name for name in policies if '_deepsem' not in name]
-        for name in flat:
-            counterpart=name+'_deepsem2'
+        contrasts=(PYRAMID_CONTRASTS if suite=='pyramid' else
+            [(name,name+'_deepsem2') for name in policies if '_deepsem' not in name])
+        for name,counterpart in contrasts:
             if counterpart not in policies:raise ValueError(f'Missing matched halved policy for{name}')
             row=comparison(by[name],by[counterpart],ids,draws=draws)
-            all_rows.append(dict(cohort=run.name,family='halved_vs_flat',reference=name,candidate=counterpart,**row))
-    for family in ('halved_vs_flat','versus_dense'):
+            all_rows.append(dict(cohort=run.name,family='pyramid_design' if suite=='pyramid' else 'halved_vs_flat',reference=name,candidate=counterpart,**row))
+    primary_family='pyramid_design' if suite=='pyramid' else 'halved_vs_flat'
+    for family in (primary_family,'versus_dense'):
         selected=[r for r in all_rows if r['family']==family]
         holm(selected,'mcnemar_exact_p','holm_family_p')
         holm(selected,'clip_p','holm_family_clip_p')
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     report=dict(cohorts=cohorts,comparisons=all_rows,bootstrap_draws=draws,environment=dict(numpy=np.__version__,scipy=scipy.__version__),
-        primary=f'Matched halved versus flat; Holm across{sum(r["family"]=="halved_vs_flat" for r in all_rows)} tests',
+        primary=f'{"Exploratory pyramid contrasts" if suite=="pyramid" else "Matched halved versus flat"}; Holm across{sum(r["family"]==primary_family for r in all_rows)} tests',
         secondary=f'Each policy versus dense baseline; Holm across{sum(r["family"]=="versus_dense" for r in all_rows)} tests',
         interval='Unique clips: conservative95% difference of97.5% exact binomial gain/loss bounds. Bootstrap supplementary; cluster bootstrap if clips repeat. Not multiplicity-adjusted or an exact-test inversion.',
         null='Two-sided equality; no equivalence/noninferiority claim or post-hoc one-sided test',
@@ -161,6 +167,9 @@ def analyze(runs,out,expected_samples=200,draws=20000):
     with (out/'paired_statistics.csv').open('w',newline='') as stream:
         writer=csv.DictWriter(stream,fieldnames=list(all_rows[0]));writer.writeheader();writer.writerows(all_rows)
     html='''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Matched caching paired statistics</title><style>body{font:16px system-ui;max-width:1500px;margin:auto;padding:20px;background:#f5f7fb;color:#203047}table{border-collapse:collapse;background:white;width:100%}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:right}td:first-child{text-align:left}.table{overflow:auto}select{font:inherit;padding:8px}p{line-height:1.5}</style></head><body><h1>Matched flat/halved cache results</h1><p>All conditions use the same frozen questions in each cohort. Gains/losses compare candidate against reference. Exact two-sided McNemar tests are primary for unique clips; clip-level paired label swaps preserve repeated audio clusters. Accuracy intervals use conservative exact gain/loss bounds for unique clips, with a supplementary cluster bootstrap. If audio repeats, displayed intervals use the approximate cluster bootstrap. No interval is multiplicity-adjusted or an exact-test inversion. Failure to reject equality does not demonstrate equivalence or safety.</p><label>Family <select id="family"><option value="halved_vs_flat">Primary: halved versus flat</option><option value="versus_dense">Secondary: versus dense baseline</option></select></label><div class="table"><table><thead><tr><th>Cohort</th><th>Reference</th><th>Candidate</th><th>N / clips</th><th>Accuracy reference→candidate</th><th>Δpp [95% CI]</th><th>Gains / losses</th><th>Exact p</th><th>Holm p</th><th>Clip p</th><th>Holm clip p</th><th>TPS reference→candidate</th><th>TPS Δ vs reference</th><th>Paired latency speedup</th></tr></thead><tbody id="rows"></tbody></table></div><script>const DATA=__DATA__;const fmt=(v,d=2)=>v==null?'N/A':v.toFixed(d);function update(){document.getElementById('rows').innerHTML=DATA.comparisons.filter(r=>r.family===document.getElementById('family').value).map(r=>`<tr><td>${r.cohort}</td><td>${r.reference}</td><td>${r.candidate}</td><td>${r.n} / ${r.audio_clusters}</td><td>${(100*r.baseline_correct/r.n).toFixed(1)}%→${(100*r.candidate_correct/r.n).toFixed(1)}%</td><td>${r.accuracy_delta_pp.toFixed(1)} [${r.accuracy_delta_ci95_pp.map(v=>v.toFixed(1)).join(', ')}]</td><td>${r.gains} / ${r.losses}</td><td>${r.mcnemar_exact_p.toPrecision(3)}</td><td>${r.holm_family_p.toPrecision(3)}</td><td>${r.clip_p.toPrecision(3)}</td><td>${r.holm_family_clip_p.toPrecision(3)}</td><td>${fmt(r.reference_tps)}→${fmt(r.candidate_tps)}</td><td>${fmt(r.tps_gain_vs_reference_percent,1)}%</td><td>${fmt(r.paired_latency_speedup,3)}×</td></tr>`).join('')}document.getElementById('family').onchange=update;update();window.PAIRED_RESULTS=DATA;</script></body></html>'''
+    if suite=='pyramid':
+        html=html.replace('Matched flat/halved cache results','Exploratory depth-pyramid cache results').replace(
+            'value="halved_vs_flat">Primary: halved versus flat','value="pyramid_design">Primary: pyramid design contrasts')
     (out/'paired_statistics.html').write_text(html.replace('__DATA__',json.dumps(report,allow_nan=False).replace('<','\\u003c')))
     return report
 
@@ -168,6 +177,7 @@ def analyze(runs,out,expected_samples=200,draws=20000):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('runs',nargs='+',type=Path)
     parser.add_argument('--out',type=Path,required=True);parser.add_argument('--expected-samples',type=int,default=200)
-    parser.add_argument('--draws',type=int,default=20000);args=parser.parse_args()
-    analyze(args.runs,args.out,args.expected_samples,args.draws)
+    parser.add_argument('--draws',type=int,default=20000)
+    parser.add_argument('--suite',choices=['legacy','pyramid'],default='legacy');args=parser.parse_args()
+    analyze(args.runs,args.out,args.expected_samples,args.draws,args.suite)
     print(f'PAIRED STATISTICS COMPLETE: {args.out}/paired_statistics.html')

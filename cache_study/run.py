@@ -20,7 +20,7 @@ from drift_study.run import WHISPER, WHISPER_REVISION
 from drift_study.storage import digest, write_json
 from .engine import PrefixCache
 from .protocol import (GROUP_ORDER,POLICIES,benchmark_source_digest,calibrate,parse_layers,
-                       layer_schedule,fixed_start_settings)
+                       layer_schedule,fixed_start_settings,pyramid_specs)
 
 
 class ForwardLimit(RuntimeError):
@@ -72,6 +72,7 @@ def parser():
     p.add_argument('--out',type=Path,default=Path('runs/cache50_long_forward10_all_deepsem2_24-31'))
     p.add_argument('--diffa-root',type=Path,default=DEFAULT_ROOT)
     p.add_argument('--policies',nargs='+',choices=list(POLICIES),default=list(POLICIES))
+    p.add_argument('--suite',choices=['legacy','pyramid'],default='legacy')
     p.add_argument('--cache-layers',default='all',help='all, 16-31, or 16,20,24; zero-based blocks')
     p.add_argument('--start',choices=['fixed','mean','half-mean','immediate'],default='fixed')
     p.add_argument('--start-forward',type=int,default=10)
@@ -111,6 +112,12 @@ def main():
         if args.deep_semantic_factor!=1:
             specs[f'{name}_deepsem{args.deep_semantic_factor}']=dict(base=base,
                 layer_intervals=layer_schedule(base,layers,deep_layers,args.deep_semantic_factor))
+    if args.suite=='pyramid':
+        if (layers!=list(range(32)) or args.start!='fixed' or args.start_forward!=10
+                or args.baseline_run or args.matched_flat or args.policies!=list(POLICIES)
+                or args.deep_semantic_factor!=2 or args.deep_semantic_layers!='24-31'):
+            raise ValueError('Pyramid suite fixes all32 layers,forward10,and its complete predefined schedules; omit legacy policy overrides')
+        specs=pyramid_specs()
     expected_models = dict(diffa=[DIFFA_REPO,DIFFA_REVISION],llm=[LLM_REPO,LLM_REVISION],
         whisper=[WHISPER,WHISPER_REVISION],lora_alpha=16)
     if 'source_models' in calibration and calibration['source_models'] != expected_models:
@@ -141,6 +148,8 @@ def main():
         environment=dict(torch=str(torch.__version__),cuda=torch.version.cuda,
             transformers=importlib.metadata.version('transformers'),gpu=torch.cuda.get_device_name(0)),
         timing='One clean synchronized autonomous generation per condition/question; shuffled order; no drift hooks.')
+    if args.suite=='pyramid':
+        config.update(suite='pyramid',deep_semantic_factor=None,deep_semantic_layers=[])
     # Roundtrip tuples so resume comparison matches JSON exactly.
     config = json.loads(json.dumps(config))
     args.out.mkdir(parents=True,exist_ok=True)

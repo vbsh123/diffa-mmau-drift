@@ -1,11 +1,18 @@
-# DIFFA-2 long-audio drift with official FPD
+# DIFFA-2 drift and caching with official FPD
 
-The new [fresh200-question matched study](STUDY200.md) runs both short and long
-MMAU with all six schedules flat and halved on the same questions, followed by
-paired confidence statistics. Start it with `scripts/study200.sh`.
+Current experiments use complete clips at most30 seconds, with one encoder
+window per question. The [short200 matched study](STUDY200.md) compares flat
+and deep-semantic-halved policies. The new [depth-pyramid study](PYRAMID200.md)
+tests full four-group depth schedules, both audio/text refresh directions, and
+matched controls on the same200 questions. Start it with
+`scripts/pyramid200_short.sh`; it produces full results and paired HTML statistics.
+
+The historical long-audio path below concatenates independently encoded windows.
+That input extension is unvalidated for the released DIFFA-2 checkpoint; its
+results should not be interpreted as established native long-audio performance.
 
 
-The default study now selects **50 complete MMAU-Pro clips longer than 60 seconds**.
+The historical default drift study selects **50 complete MMAU-Pro clips longer than 60 seconds**.
 There is **no fixed maximum clip duration**, no `short` metadata filter, and no
 24MiB payload cutoff. Entire clips must fit the pinned backbone's actual context
 budget: 4096 positions including audio, text and 128 answer slots. A clip that does

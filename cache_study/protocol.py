@@ -19,6 +19,26 @@ POLICIES = {
 GROUP_ORDER = ('acoustic', 'text', 'semantic')
 
 
+def pyramid_specs():
+    """Fixed small exploratory suite; intervals are A/text/S at each block."""
+    layers=list(range(32))
+    specs={name:dict(base=POLICIES[name],layer_intervals=layer_schedule(POLICIES[name],layers))
+           for name in ('161616','16816')}
+    specs['888_deepsem2']=dict(base=POLICIES['888'],
+        layer_intervals=layer_schedule(POLICIES['888'],layers,range(24,32),2))
+    for name,numerator,denominator in [('pyramid_equal',1,1),('pyramid_audio_slow',2,1),
+                                        ('pyramid_audio_fast',1,2)]:
+        schedule={layer:(value*numerator//denominator,value,value*numerator//denominator)
+                  for layer in layers for value in [(64,32,16,8)[layer//8]]}
+        specs[name]=dict(base=schedule[0],layer_intervals=schedule)
+    return specs
+
+
+PYRAMID_CONTRASTS=(('161616','pyramid_equal'),
+                   ('pyramid_equal','pyramid_audio_slow'),
+                   ('pyramid_equal','pyramid_audio_fast'))
+
+
 def parse_layers(value, count=32):
     if value == 'all':
         return list(range(count))

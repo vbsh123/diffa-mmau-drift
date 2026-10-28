@@ -13,7 +13,7 @@ import torch
 
 from cache_study.engine import PrefixCache
 from cache_study.protocol import (POLICIES,benchmark_source_digest,calibrate,parse_layers,start_from_mean,
-                                  layer_schedule,fixed_start_settings)
+                                  layer_schedule,fixed_start_settings,pyramid_specs)
 from cache_study.run import measure,parser
 from drift_study.protocol import prompt_for
 from drift_study.storage import digest, source_digest, write_json
@@ -21,6 +21,23 @@ import test_study as reference_tests
 
 
 class CacheProtocolTests(unittest.TestCase):
+    def test_pyramid_depths_ratios_controls_and_synchronized_refreshes(self):
+        specs=pyramid_specs()
+        self.assertEqual(len(specs),6)
+        for name,expected in [('pyramid_equal',[(64,64,64),(32,32,32),(16,16,16),(8,8,8)]),
+                              ('pyramid_audio_slow',[(128,64,128),(64,32,64),(32,16,32),(16,8,16)]),
+                              ('pyramid_audio_fast',[(32,64,32),(16,32,16),(8,16,8),(4,8,4)])]:
+            schedule=specs[name]['layer_intervals']
+            for layer in range(32):self.assertEqual(schedule[layer],expected[layer//8])
+            # Every shallower refresh must also refresh the same modality deeper.
+            for offset in range(1,257):
+                for group in range(3):
+                    for shallow,deep in [(0,8),(8,16),(16,24)]:
+                        if offset%schedule[shallow][group]==0:
+                            self.assertEqual(offset%schedule[deep][group],0)
+        self.assertEqual(specs['888_deepsem2']['layer_intervals'][23],(8,8,8))
+        self.assertEqual(specs['888_deepsem2']['layer_intervals'][24],(8,8,4))
+        self.assertEqual(specs['16816']['layer_intervals'][31],(16,8,16))
     def test_requested_schedules_and_depth_selection(self):
         self.assertEqual(list(POLICIES.values()),[(16,16,16),(8,8,8),(16,8,16),(16,16,8),(32,32,16),(32,16,32)])
         self.assertEqual(parse_layers('16-31'),list(range(16,32)))
@@ -113,6 +130,28 @@ class CacheEngineTests(unittest.TestCase):
                 return current,output[1]
             block.register_forward_hook(hidden)
         return clock
+
+    @torch.no_grad()
+    def test_pyramid_shallow_deep_logits_against_independent_dense_stale_reference(self):
+        for name in ('pyramid_equal','pyramid_audio_slow','pyramid_audio_fast'):
+            spec=pyramid_specs()[name]
+            # Exercise extrema of the full32-block schedule on the two-block model.
+            schedule={0:spec['layer_intervals'][0],1:spec['layer_intervals'][31]}
+            tested=deepcopy(self.llm).float();reference=deepcopy(self.llm).float()
+            clock=self.install_dense_reference(reference,spec['base'],[0,1],10,schedule)
+            with PrefixCache(tested,self.prepared,spec['base'],[0,1],10,schedule) as cache:
+                for step in range(139):
+                    clock[0]=step;torch.manual_seed(1200+step)
+                    inputs=torch.randn(1,self.prepared.prefix_length+4,16)
+                    torch.testing.assert_close(tested(inputs_embeds=inputs).logits,
+                        reference(inputs_embeds=inputs).logits,atol=3e-6,rtol=3e-6)
+                    for layer in (0,1):
+                        self.assertTrue(all(p in cache.active_ids_by_layer[layer]
+                            for p in range(self.prepared.prefix_length,inputs.shape[1])))
+            for layer in (0,1):
+                for i,group in enumerate(('acoustic','text','semantic')):
+                    expected=sum(step<=9 or (step-9)%schedule[layer][i]==0 for step in range(139))
+                    self.assertEqual(cache.accounting()['refresh_counts_by_layer'][str(layer)][group],expected)
 
     @torch.no_grad()
     def test_row_skipping_matches_independent_dense_stale_state_reference(self):

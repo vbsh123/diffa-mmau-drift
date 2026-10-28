@@ -15,7 +15,7 @@ import soundfile as sf
 from scipy.stats import binomtest
 
 from cache_study.paired import comparison,exact_mcnemar,clip_signflip,analyze
-from cache_study.protocol import POLICIES,layer_schedule
+from cache_study.protocol import POLICIES,layer_schedule,pyramid_specs
 from drift_study.audio_windows import INPUT_PROTOCOL
 from drift_study.data import prepare,read_manifest,DATASET
 from drift_study.protocol import prompt_for
@@ -97,6 +97,12 @@ class FreshCohortTests(unittest.TestCase):
                  patch('cache_study.run.verify_checkout') as checkout,patch('cache_study.run.load_model') as model,redirect_stdout(io.StringIO()) as output:
                 main()
             checkout.assert_not_called();model.assert_not_called();self.assertIn('PREFLIGHT PASSED',output.getvalue())
+            with patch.object(sys,'argv',['run','--manifest',str(path),'--samples','200','--suite','pyramid','--preflight-only']),\
+                 patch('cache_study.run.load_model') as model,redirect_stdout(io.StringIO()) as output:
+                main()
+            model.assert_not_called();self.assertIn('PREFLIGHT PASSED',output.getvalue())
+            with patch.object(sys,'argv',['run','--manifest',str(path),'--suite','pyramid','--start-forward','9','--preflight-only']):
+                with self.assertRaisesRegex(ValueError,'Pyramid suite fixes'):main()
 
     def test_actual200_launcher_freezes_both_cohorts_before_two_matched_jobs(self):
         import os,shlex,subprocess
@@ -183,6 +189,26 @@ else:
             plan=json.loads((root/'runs'/'mmau200_short_only_plan.json').read_text())
             self.assertEqual(plan['timed_generations'],2600)
             self.assertTrue((root/'runs'/'mmau200_short_only_results.tar.gz').is_file())
+            (scripts/'pyramid200_short.sh').write_bytes((repository/'scripts/pyramid200_short.sh').read_bytes())
+            (root/'calls.jsonl').unlink()
+            cohort=root/'data'/'mmau200_short_stereo_v2.json';old_hash=digest(cohort)
+            done=subprocess.run(['bash','scripts/pyramid200_short.sh'],cwd=root,env=env,capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+            self.assertEqual([c['kind'] for c in calls],['preflight','decode','statistics'])
+            self.assertEqual(old_hash,digest(cohort))
+            for call in calls:self.assertEqual(call['args'][call['args'].index('--suite')+1],'pyramid')
+            plan=json.loads((root/'runs'/'mmau200_short_pyramid_plan.json').read_text())
+            self.assertEqual(plan['timed_generations'],1400)
+            self.assertEqual(plan['conditions_per_question'],7)
+            self.assertTrue(plan['exploratory'])
+            self.assertTrue((root/'runs'/'mmau200_short_pyramid_results.tar.gz').is_file())
+            # A new machine can still prepare the same deterministic short cohort.
+            cohort.unlink();(root/'calls.jsonl').unlink()
+            done=subprocess.run(['bash','scripts/pyramid200_short.sh'],cwd=root,env=env,capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+            self.assertEqual([c['kind'] for c in calls],['prepare','preflight','decode','statistics'])
 
 
 class MatchedStatisticsTests(unittest.TestCase):
@@ -215,6 +241,31 @@ class MatchedStatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(clip_signflip(deltas),expected)
         self.assertEqual(exact_mcnemar(0,0),1.)
         self.assertEqual(exact_mcnemar(4,0),.125)
+
+    def test_pyramid_statistics_validate_profiles_and_separate_three_and_six_test_families(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);run=root/'pyramid';specs=pyramid_specs()
+            write_json(run/'cohort.json',dict(rows=[dict(id=i,audio_sha256=r['audio_sha256'],target='A')
+                for i,r in self.records(2).items()]))
+            config=dict(suite='pyramid',sample_ids=['0','1'],manifest_sha256=digest(run/'cohort.json'),
+                policies={n:s['base'] for n,s in specs.items()},
+                layer_intervals={n:s['layer_intervals'] for n,s in specs.items()},
+                cache_layers=list(range(32)),deep_semantic_factor=None,deep_semantic_layers=[],
+                calibration=dict(start_mode='fixed',dense_warmup_forwards=10),models={},
+                decoder=dict(max_answer_tokens=128,block_tokens=32,factor=1.,temperature=0.),seed=1,source_sha256='same')
+            write_json(run/'config.json',config)
+            for condition in ['baseline']+list(specs):
+                for i,r in self.records(2).items():write_json(run/'samples'/f'{int(i):05d}'/(condition+'.json'),r)
+            result=analyze([run],root/'stats',expected_samples=2,draws=100,suite='pyramid')
+            self.assertEqual(sum(r['family']=='pyramid_design' for r in result['comparisons']),3)
+            self.assertEqual(sum(r['family']=='versus_dense' for r in result['comparisons']),6)
+            self.assertIn('across3 tests',result['primary'])
+            self.assertIn('value="pyramid_design"',(root/'stats'/'paired_statistics.html').read_text())
+            with self.assertRaisesRegex(ValueError,'suite differs'):analyze([run],root/'bad',2,100)
+            config['layer_intervals']['pyramid_audio_slow'][31]=(16,16,16)
+            write_json(run/'config.json',config)
+            with self.assertRaisesRegex(ValueError,'per-layer schedule differs'):
+                analyze([run],root/'bad',2,100,suite='pyramid')
 
     def test_complete_two_cohort_report_has_12_primary_24_secondary_and_rejects_missing_pairs(self):
         with tempfile.TemporaryDirectory() as temporary:
