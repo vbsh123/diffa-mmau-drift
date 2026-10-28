@@ -1,5 +1,30 @@
 # 200-question matched caching study
 
+## Short-only run (recommended current experiment)
+
+Long-audio concatenation across independent encoder windows is an unvalidated
+input extension. Use the short-only launcher to avoid that confound. It selects
+200 complete clips at most30 seconds, so every example uses one encoder window.
+All13 conditions remain matched: dense baseline, six flat policies and six
+deep-semantic halvings, starting reuse at zero-based forward10. No old files are
+required. Prior50 overlap is unchecked. Total:2600 timed generations.
+
+```bash
+cd /workspace/diffa-mmau-200
+git pull --ff-only
+nohup env SKIP_INSTALL=1 bash scripts/study200_short.sh > study200_short.log 2>&1 &
+tail -f study200_short.log
+```
+
+Use `SKIP_INSTALL=1` only with a working installation; otherwise omit it.
+Stop an active two-cohort job before launching this one on the same GPU.
+Outputs are separate from the two-cohort experiment. Download
+`runs/mmau200_short_only_results.tar.gz`; it includes the frozen plan, all
+per-question results, and HTML/CSV/JSON paired statistics. Holm families contain
+six halved-vs-flat and twelve cache-vs-dense comparisons for this single cohort.
+
+## Original two-cohort protocol (long input extension unvalidated)
+
 Two frozen cohorts,200 questions each. All13 conditions run on exactly the same
 questions within each cohort: one fresh dense baseline, six flat refresh schedules,
 and the same six with semantic intervals halved only in blocks24–31.

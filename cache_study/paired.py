@@ -152,8 +152,8 @@ def analyze(runs,out,expected_samples=200,draws=20000):
         holm(selected,'clip_p','holm_family_clip_p')
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     report=dict(cohorts=cohorts,comparisons=all_rows,bootstrap_draws=draws,environment=dict(numpy=np.__version__,scipy=scipy.__version__),
-        primary='Matched halved versus flat; Holm across12 tests when both cohorts are supplied',
-        secondary='Each policy versus dense baseline; Holm across24 tests when both cohorts are supplied',
+        primary=f'Matched halved versus flat; Holm across{sum(r["family"]=="halved_vs_flat" for r in all_rows)} tests',
+        secondary=f'Each policy versus dense baseline; Holm across{sum(r["family"]=="versus_dense" for r in all_rows)} tests',
         interval='Unique clips: conservative95% difference of97.5% exact binomial gain/loss bounds. Bootstrap supplementary; cluster bootstrap if clips repeat. Not multiplicity-adjusted or an exact-test inversion.',
         null='Two-sided equality; no equivalence/noninferiority claim or post-hoc one-sided test',
         scorer='Original strict final-answer scores; no rescoring',expected_samples=expected_samples)

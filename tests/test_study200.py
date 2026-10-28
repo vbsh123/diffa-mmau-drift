@@ -167,6 +167,22 @@ else:
             calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()][7:]
             self.assertFalse(any('--exclude-manifest' in c['args'] for c in calls))
             self.assertIn('previous-cohort overlap is unchecked',done.stdout)
+            (scripts/'study200_short.sh').write_bytes((repository/'scripts/study200_short.sh').read_bytes())
+            (root/'calls.jsonl').unlink()
+            # Even stale paths from the old launcher must not require old files.
+            env.update(ORIGINAL_MANIFEST='/missing/old.json',LONG_MANIFEST='/missing/long.json')
+            done=subprocess.run(['bash','scripts/study200_short.sh'],cwd=root,env=env,capture_output=True,text=True)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+            self.assertEqual([c['kind'] for c in calls],['prepare','preflight','decode','statistics'])
+            self.assertIn('--max-seconds',calls[0]['args'])
+            self.assertFalse(any('--exclude-manifest' in c['args'] for c in calls))
+            for call in calls[1:3]:
+                self.assertIn('--matched-flat',call['args'])
+                self.assertEqual(call['args'][call['args'].index('--start-forward')+1],'10')
+            plan=json.loads((root/'runs'/'mmau200_short_only_plan.json').read_text())
+            self.assertEqual(plan['timed_generations'],2600)
+            self.assertTrue((root/'runs'/'mmau200_short_only_results.tar.gz').is_file())
 
 
 class MatchedStatisticsTests(unittest.TestCase):
@@ -223,6 +239,10 @@ class MatchedStatisticsTests(unittest.TestCase):
             self.assertTrue(all(r['holm_family_p']==1. for r in result['comparisons']))
             self.assertTrue(all(r['accuracy_delta_ci95_pp'][0]<0<r['accuracy_delta_ci95_pp'][1] for r in result['comparisons']))
             self.assertTrue((root/'stats'/'paired_statistics.html').exists())
+            short=analyze(runs[:1],root/'short_stats',expected_samples=2,draws=100)
+            self.assertEqual(sum(r['family']=='halved_vs_flat' for r in short['comparisons']),6)
+            self.assertEqual(sum(r['family']=='versus_dense' for r in short['comparisons']),12)
+            self.assertIn('across6 tests',short['primary'])
             (runs[0]/'samples'/'00001'/'888.json').unlink()
             with self.assertRaisesRegex(ValueError,'incomplete'):analyze(runs,root/'stats2',expected_samples=2,draws=100)
 
